@@ -25,11 +25,11 @@ LocalizationWrapper::LocalizationWrapper(ros::NodeHandle &nh) {
         std::make_shared<rtk_odom_component::RTKOdom>(config_file);
     gps2_enu_ptr_ = std::make_unique<LocalCartesianENU>();
     imu_sub_ =
-        nh.subscribe("/Ser_imu", 10, &LocalizationWrapper::ImuCallback, this);
+        nh.subscribe(Config::imu_topic_, 10, &LocalizationWrapper::ImuCallback, this);
     gps_position_sub_ = nh.subscribe(
-        "/GPS_fix", 10, &LocalizationWrapper::GpsPositionCallback, this);
+        Config::rtk_topic_, 10, &LocalizationWrapper::GpsPositionCallback, this);
     wheel_sub_ =
-        nh.subscribe("/Ser_odom", 10, &LocalizationWrapper::WheelCallback, this);
+        nh.subscribe(Config::wheel_topic_, 10, &LocalizationWrapper::WheelCallback, this);
     odom2_pub_ = nh.advertise<nav_msgs::Path>("odom2_path", 10);
     odom1_pub_ = nh.advertise<nav_msgs::Path>("odom1_path", 10);
     rtk_dr_pub_ = nh.advertise<nav_msgs::Path>("rtk_dr_path", 10);
@@ -167,7 +167,7 @@ void LocalizationWrapper::GpsPositionCallback(
     const sensor_msgs::NavSatFixConstPtr &gps_msg_ptr) {
     // Check the gps_status.
     bool rtk_good = true;
-    if (gps_msg_ptr->position_covariance[0] + gps_msg_ptr->position_covariance[4] > 0.005) { // RTK 噪声过大，认为是不可信的 fixme:是否存在中间的临界状态？
+    if (gps_msg_ptr->position_covariance[0] + gps_msg_ptr->position_covariance[4] > 0.003) { // RTK 噪声过大，认为是不可信的 fixme:是否存在中间的临界状态？
         rtk_good = false;
     }
     if (gps_msg_ptr->status.status != 4 || !rtk_good) {

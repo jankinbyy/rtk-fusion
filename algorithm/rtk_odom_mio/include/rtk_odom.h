@@ -79,6 +79,7 @@ public:
         Gnss_With_DrOdom &align_rtk_dr_pose);
     const int RTK_BUF_SIZE = 31;
     EKF rtk_fusion_dr_;
+    DebugMode rtk_odom_log_;
 
 private:
     int calculate_rtk_with_odom(std::list<OdometryData> &odomData, GnssData &rtk_pos);

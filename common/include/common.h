@@ -11,6 +11,7 @@
 #include "eigen3/Eigen/SVD"
 #include "eigen3/Eigen/Dense"
 #include <limits>
+#include "log.hpp"
 constexpr double kDeg2Rad = M_PI / 180.;
 constexpr double kRad2Deg = 180. / M_PI;
 constexpr double kGravity = 9.8;

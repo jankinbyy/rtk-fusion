@@ -41,6 +41,7 @@ RTKOdom::RTKOdom(const string &config_file) {
     thd_process = std::thread(&RTKOdom::process_rtk_odom, this);
 
     ofLogOut << "init RTKOdom ok" << endl;
+    rtk_odom_log_.Init("rtk odom", 2, "../log/rtk_odom.log"); //3
 }
 RTKOdom::~RTKOdom() {
     start_thd_ = false;
@@ -353,7 +354,6 @@ void RTKOdom::process_rtk_odom() {
                 Eigen::Vector3d XYZRtkFrame = {itr_rtk->x, itr_rtk->y, 0.0};
                 double out_yaw1 = 0.0;
                 if (EstimateYawInENU(XYZRtkFrame, out_yaw1)) {
-                    //std::cout << "yaw is success:" << out_yaw1 << std::endl;
                     itr_rtk->yaw = out_yaw1;
                 }
                 lRtkData.push_back(*itr_rtk);
@@ -371,17 +371,17 @@ void RTKOdom::process_rtk_odom() {
             int ret_try = tryCalcTransOdomToRtk(svd_rtk_buf, svd_odom_buf);
             if (ret_try == 0) {
                 getTransFlag_ = true;
-                //ofLogOut << "set getTransFlag_ " << (int)getTransFlag_ << endl;
-                //cerr << "set getTransFlag_ " << (int)getTransFlag_ << endl;
             }
         }
 
         //got T, and new RTK, pls try output Pose
         auto itr_rtk = lRtkData.begin();
+        rtk_odom_log_(1, "calculate rtk");
         while (itr_rtk != lRtkData.end() && lOdomData.size()) {
             if (itr_rtk->time > lOdomData.back().time) {
                 break;
             }
+            rtk_odom_log_(1, "calculate rtk");
             GnssData cur_gnss_pos = *itr_rtk;
             //has aligned
             int ret_cal = calculate_rtk_with_odom(lOdomData, cur_gnss_pos);
@@ -389,19 +389,8 @@ void RTKOdom::process_rtk_odom() {
                 cerr << fixed << setprecision(6) << " pls wait next odom " << cur_gnss_pos.time << endl;
                 break;
             } else if (ret_cal == 0) {
-                //for pub
                 updateOutputPos(filtered_pos);
-                //after trans ok, pub result
-                // ofDataOut << filtered_pos.time << " "
-                //           << filtered_pos.gnss_data.time << " " << filtered_pos.gnss_data.x << " " << filtered_pos.gnss_data.y << " " << filtered_pos.gnss_data.z << " "
-                //           << filtered_pos.gnss_data.rol << " " << filtered_pos.gnss_data.pitch << " " << filtered_pos.gnss_data.yaw << " "
-                //           << filtered_pos.status << "      "
-                //           << filtered_pos.ref_drOdom.time << " " << filtered_pos.ref_drOdom.position[0] << " "
-                //           << filtered_pos.ref_drOdom.position[1] << " " << filtered_pos.ref_drOdom.position[2] << " "
-                //           << filtered_pos.ref_drOdom.angle_xyz[0] << " " << filtered_pos.ref_drOdom.angle_xyz[1] << " "
-                //           << filtered_pos.ref_drOdom.angle_xyz[2] << endl;
             }
-
             itr_rtk++;
             lRtkData.pop_front();
         }              //end while rtk
@@ -457,6 +446,7 @@ int RTKOdom::calculate_rtk_with_odom(std::list<OdometryData> &odomData, GnssData
     TmpOdomData.covariance[1] = 0.03;
     TmpOdomData.covariance[2] = 0.03;
     TmpOdomData.covariance[5] = 180 * kDeg2Rad; //默认航向误差为180度
+    rtk_odom_log_(1, "calculate_rtk_with_odom");
     while (odomData.size() && odomData.front().time < rtk_pos.time) {
         TmpOdomData = odomData.front(); //rtk的前一帧odom数据
         odomData.pop_front();
@@ -519,7 +509,7 @@ OdometryData RTKOdom::fusion20ms_with_rtk(
     }
     Gnss_With_DrOdom align_rtk_dr = align_rtk_dr_pose;
     bool g_align_pose_update = false;
-    if (last_align_rtk_dr_pos_.gnss_data.x != align_rtk_dr.gnss_data.x) { //如果有更新。更新队列
+    if (last_align_rtk_dr_pos_.time != align_rtk_dr.time) { //如果有更新。更新队列
         g_align_pose_update = true;
         algin_gnss_dr_que_.push_back(align_rtk_dr);
         while (algin_gnss_dr_que_.size() > 10) {
@@ -531,13 +521,22 @@ OdometryData RTKOdom::fusion20ms_with_rtk(
     }
     OdometryData cur_predict_pos; // for pub, 50Hz;
     double delta_angule = tmp_dr_pose.angle_xyz[2] - last_dr_pose_.angle_xyz[2];
-    //std::cout << "dr angular:" << tmp_dr_pose.angle_xyz[2] << ",delta angule is:" << delta_angule << std::endl;
-    if (align_rtk_dr.status == 1 && g_align_pose_update) {         //rtk准确,更新直接更新,未更新直接递推
-        cur_predict_pos.angle_xyz[2] = align_rtk_dr.gnss_data.yaw; //+ 0.9 * (last_predict_pose_.angle_xyz[2] + delta_angule);
-        std::cout << "rtk yaw is right:" << cur_predict_pos.angle_xyz[2] << std::endl;
+    if (align_rtk_dr.status == 1 && g_align_pose_update) { //rtk准确,更新直接更新,未更新直接递推
+        if (dr_que_.size()) {
+            while (dr_que_.size()) {
+                if (dr_que_.front().time > align_rtk_dr.time) {
+                    cur_predict_pos.angle_xyz[2] = align_rtk_dr.gnss_data.yaw + dr_que_.back().angle_xyz[2] - dr_que_.front().angle_xyz[2];
+                    break;
+                } else {
+                    dr_que_.pop_front();
+                }
+            }
+        } else
+            cur_predict_pos.angle_xyz[2] = align_rtk_dr.gnss_data.yaw; //+ 0.9 * (last_predict_pose_.angle_xyz[2] + delta_angule);
+        rtk_odom_log_(2, "rtk yaw is right:" + to_string(cur_predict_pos.angle_xyz[2]));
     } else if (align_rtk_dr.status == 2) { //rtk与dr相差较小,CalAglDif_误差小,更新
         cur_predict_pos.angle_xyz[2] = tmp_dr_pose.angle_xyz[2] + CalAglDif_.second;
-        std::cout << "CalAglDif is right:" << cur_predict_pos.angle_xyz[2] << std::endl;
+        rtk_odom_log_(2, "CalAglDif is right:" + to_string(cur_predict_pos.angle_xyz[2]));
     } else {
         cur_predict_pos.angle_xyz[2] = last_predict_pose_.angle_xyz[2] + delta_angule; //预测
     }
@@ -577,9 +576,15 @@ OdometryData RTKOdom::fusion20ms_with_rtk(
 bool RTKOdom::EstimateYawInENU(Eigen::Vector3d in_pose, double &out_yaw) {
     bool tmp_ret = false;
     double tmp_length = (g_last_rtk - in_pose).norm();
-    if (tmp_length > 0.3 && tmp_length < 0.8) {
+    double ang_err = 0.5;
+    double len_dis = 0.25;
+    if (!getTransFlag_)
+        ang_err = 3.0;
+    if (!getTransFlag_)
+        len_dis = 0.05;
+    if (tmp_length > len_dis && tmp_length < 0.8) {
         est_yaw[1] = atan2(in_pose[1] - g_last_rtk[1], in_pose[0] - g_last_rtk[0]) * 180.0 / M_PI;
-        if (abs(est_yaw[1] - est_yaw[0]) < 0.5) {
+        if (abs(est_yaw[1] - est_yaw[0]) < ang_err) {
             out_yaw = est_yaw[1] * M_PI / 180.0;
             tmp_ret = true;
         }
