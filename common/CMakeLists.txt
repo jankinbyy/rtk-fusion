@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 2.8.3)
+project(common)
+SET(CMAKE_BUILD_TYPE "Release")
+include_directories(include)
+file(GLOB_RECURSE ALL_SRCS src/*)
+add_library(common_lib SHARED ${ALL_SRCS})
+target_link_libraries(common_lib PUBLIC ${ALL_TARGET_LIBRARIES})

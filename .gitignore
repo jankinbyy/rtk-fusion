@@ -1,0 +1,6 @@
+build 
+log
+data
+*.png
+*.jpg
+.vscode

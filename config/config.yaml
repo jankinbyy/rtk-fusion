@@ -1,0 +1,18 @@
+common:
+  log_save_path: ../log
+topic:
+  imu_topic: /Ser_imu
+  wheel_topic: /Ser_odom
+  rtk_topic: /GPS_fix
+
+config:
+  acc_cov: 0.1
+  gyr_cov: 0.1
+  b_acc_cov: 0.0001
+  b_gyr_cov: 0.0001
+  det_range: 100.0
+  wheel_sx: 0.93
+  imu_t_wheel: [ 0.0014,-0.8164,-0.491]
+  imu_R_wheel: [ 0, -1, 0,
+                 1, 0, 0,
+                 0, 0, 1 ]
