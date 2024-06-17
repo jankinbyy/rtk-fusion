@@ -12,7 +12,7 @@ LocalizationWrapper::LocalizationWrapper(ros::NodeHandle &nh) {
     // Log.
     file_state_.open(log_folder + "/state.csv");
     file_gps_.open(log_folder + "/gps.csv");
-
+    ros_wrapper_log_.Init("ros_wrapper", 3, "../log/ros_wrapp.log");
     // Initialization imu gps localizer.
     Eigen::Matrix4d mTvi = Eigen::Matrix4d::Identity();
     mTvi << 0, -1, 0, 0.0000, 1, 0, 0, -0.812, 0, 0, 1, -0.483, 0, 0, 0,
@@ -66,10 +66,10 @@ void LocalizationWrapper::Evaluate() {
                 // Similar unlock, process, and re-lock pattern.
                 lock.unlock();
                 imu_wheel_localizer_ptr_->setWheel(odom_msg.timestamp, odom_msg.vel(0),
-                                                   odom_msg.gyr(2));
+                                                   odom_msg.gyro(2));
                 if (DR_ODOM1)
                     imu_wheel_loc_ptr_->setWheel(odom_msg.timestamp, odom_msg.vel(0),
-                                                 odom_msg.gyr(2));
+                                                 odom_msg.gyro(2));
                 lock.lock();
             }
         }
@@ -102,12 +102,14 @@ void LocalizationWrapper::EvaluateRTK() {
         while (!rtk_buf_.empty()) {
             auto rtk_msg = rtk_buf_.front();
             rtk_buf_.pop_front();
+            ros_wrapper_log_(2, "input_gnss_to_fusion");
             filterangle_odom_rtk_ptr_->inputGnssMsg(rtk_msg);
         }
         while (!dr_buf_.empty()) {
             auto odom_msg = dr_buf_.front();
             dr_buf_.pop_front();
             //lock_rtk.unlock();
+            ros_wrapper_log_(2, "input_dr_to_fusion");
             filterangle_odom_rtk_ptr_->inputOdomMsg(odom_msg);
             OdometryData pub_pose =
                 filterangle_odom_rtk_ptr_->getOdometry();
@@ -148,6 +150,7 @@ LocalizationWrapper::~LocalizationWrapper() {
 
 void LocalizationWrapper::ImuCallback(
     const sensor_msgs::ImuConstPtr &imu_msg_ptr) {
+    ros_wrapper_log_(2, "input_imu");
     IMUDataPtr imu_data_ptr =
         std::make_shared<IMUData>();
     imu_data_ptr->timestamp = imu_msg_ptr->header.stamp.toSec();
@@ -166,39 +169,41 @@ void LocalizationWrapper::ImuCallback(
 void LocalizationWrapper::GpsPositionCallback(
     const sensor_msgs::NavSatFixConstPtr &gps_msg_ptr) {
     // Check the gps_status.
-    bool rtk_good = true;
+    int gps_status = gps_msg_ptr->status.status;
     if (gps_msg_ptr->position_covariance[0] + gps_msg_ptr->position_covariance[4] > 0.003) { // RTK 噪声过大，认为是不可信的 fixme:是否存在中间的临界状态？
-        rtk_good = false;
+        gps_status = 2;
     }
-    if (gps_msg_ptr->status.status != 4 || !rtk_good) {
-        //LOG(WARNING) << "[GpsCallBack]: Bad gps message!";
-        return;
-    }
+    // if (gps_status != 4) {
+    //     return;
+    // }
     if (last_reveive_rtk_time == gps_msg_ptr->header.stamp.toSec()) return;
-
+    ros_wrapper_log_(2, "input_gps");
     Eigen::Matrix<double, 7, 1> pose_out;
     pose_out[0] = gps_msg_ptr->header.stamp.toSec();
     gps2_enu_ptr_->Forward(gps_msg_ptr->longitude, gps_msg_ptr->latitude, gps_msg_ptr->altitude, pose_out[1], pose_out[2], pose_out[3]);
-    ConvertStateToRosTopic(pose_out, rtk_true_path_);
-    rtk_true_pub_.publish(rtk_true_path_);
+    if (gps_status == 4) {
+        ConvertStateToRosTopic(pose_out, rtk_true_path_);
+        rtk_true_pub_.publish(rtk_true_path_);
+    }
     GnssData gps_data(
-        gps_msg_ptr->header.stamp.toSec(), gps_msg_ptr->longitude, gps_msg_ptr->latitude, gps_msg_ptr->altitude, pose_out[1], pose_out[2], pose_out[3], gps_msg_ptr->status.status,
+        gps_msg_ptr->header.stamp.toSec(), gps_msg_ptr->longitude, gps_msg_ptr->latitude, gps_msg_ptr->altitude, pose_out[1], pose_out[2], pose_out[3], gps_status,
         gps_msg_ptr->status.service);
     {
         std::unique_lock<std::shared_timed_mutex> lock_rtk(rtk_dr_mutex_);
         rtk_buf_.push_back(gps_data);
-        last_reveive_rtk_time = gps_data.time;
+        last_reveive_rtk_time = gps_data.timestamp;
     }
     rtk_dr_condition_.notify_one();
 }
 void LocalizationWrapper::WheelCallback(
     const geometry_msgs::TwistStampedConstPtr &twist_msg_ptr) {
+    ros_wrapper_log_(2, "input_wheel");
     VelocityDataPtr wheel_data_ptr =
         std::make_shared<VelocityData>();
     wheel_data_ptr->timestamp = twist_msg_ptr->header.stamp.toSec();
     wheel_data_ptr->vel << twist_msg_ptr->twist.linear.x * Config::wheel_sx_,
         twist_msg_ptr->twist.linear.y, twist_msg_ptr->twist.linear.z;
-    wheel_data_ptr->gyr << twist_msg_ptr->twist.angular.x,
+    wheel_data_ptr->gyro << twist_msg_ptr->twist.angular.x,
         twist_msg_ptr->twist.angular.y, twist_msg_ptr->twist.angular.z;
     {
         std::unique_lock<std::shared_timed_mutex> lock(m_data_mutex_);

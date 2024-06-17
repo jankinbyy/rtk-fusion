@@ -42,7 +42,7 @@ void DrOdoFlow::setWheel(double time_s, double vel_linear,
     {
         VelocityData in_wheel(time_s, vel_linear, vel_angular);
         //std::unique_lock<std::mutex> lock(mWheelDataMutex);
-        if (abs(in_wheel.linear_velocity.x) > 0.0 || abs(in_wheel.angular_velocity.z) > 0.0)
+        if (abs(in_wheel.vel.x()) > 0.0 || abs(in_wheel.gyro.z()) > 0.0)
             nonZeroLast = in_wheel;
         unsynced_velocity_.push_back(in_wheel);
     }
@@ -50,7 +50,7 @@ void DrOdoFlow::setWheel(double time_s, double vel_linear,
 void DrOdoFlow::ReadData(IMUData &input_imu, VelocityData &in_wheel) //放入数据
 {
     raw_imu_.push_back(input_imu);
-    if (abs(in_wheel.linear_velocity.x) > 0.0 || abs(in_wheel.linear_velocity.y) > 0.0 || abs(in_wheel.linear_velocity.z) > 0.0)
+    if (abs(in_wheel.vel.x()) > 0.0 || abs(in_wheel.gyro.z()) > 0.0)
         nonZeroLast = in_wheel;
     unsynced_velocity_.push_back(in_wheel);
 }
@@ -58,7 +58,7 @@ void DrOdoFlow::ReadData(IMUData &input_imu) {
     raw_imu_.push_back(input_imu);
 }
 void DrOdoFlow::ReadData(VelocityData &in_wheel) {
-    if (abs(in_wheel.linear_velocity.x) > 0.0 || abs(in_wheel.linear_velocity.y) > 0.0 || abs(in_wheel.linear_velocity.z) > 0.0)
+    if (abs(in_wheel.vel.x()) > 0.0 || abs(in_wheel.gyro.z()) > 0.0)
         nonZeroLast = in_wheel;
     unsynced_velocity_.push_back(in_wheel);
 }
@@ -72,7 +72,7 @@ void DrOdoFlow::updateDrOdo() {
     while (unsynced_imu_.size() > 1) {
         IMUData imu_front = unsynced_imu_.at(0);
         IMUData imu_back = unsynced_imu_.at(1);
-        if (imu_front.time == imu_back.time) {
+        if (imu_front.timestamp == imu_back.timestamp) {
             unsynced_imu_.pop_front();
             continue;
         }
@@ -82,7 +82,7 @@ void DrOdoFlow::updateDrOdo() {
         pose_mtx_.lock();
         Twi = Twi * T_prev_cur_imu;
         T_delta_ = T_prev_cur_imu;
-        pub_odomtry_.time = imu_front.time;
+        pub_odomtry_.time = imu_front.timestamp;
         pub_odomtry_.position = Twi.block<3, 1>(0, 3);
         //std::cout << "DR1 POS:" << Twi << std::endl;
         pub_odomtry_.R_Mat = Twi.block<3, 3>(0, 0);
@@ -114,7 +114,7 @@ Eigen::Matrix4d DrOdoFlow::Fusing_IMU_VelOdom(IMUData imu_front, IMUData imu_bac
     Eigen::Matrix3d J_prev_cur_imu = Eigen::Matrix3d::Identity();
     Eigen::Matrix3d R_prev_cur_imu = Eigen::Matrix3d::Identity();
 
-    R_prev_cur_imu = imu_front.orientation.getRoation().transpose() * imu_back.orientation.getRoation(); // Imu获取角度估计,计算变化值
+    R_prev_cur_imu = QuatToRotMax(imu_front.orientation).transpose() * QuatToRotMax(imu_back.orientation); // Imu获取角度估计,计算变化值
     Eigen::AngleAxisd delta_se3(R_prev_cur_imu);
     double phi = delta_se3.angle();
     Eigen::Vector3d axis = delta_se3.axis();
@@ -123,8 +123,8 @@ Eigen::Matrix4d DrOdoFlow::Fusing_IMU_VelOdom(IMUData imu_front, IMUData imu_bac
     else
         J_prev_cur_imu = sin(phi) / phi * Eigen::Matrix3d::Identity() + (1 - sin(phi) / phi) * axis * axis.transpose() + ((1 - cos(phi)) / phi) * skew(axis); //视觉14讲，p73 4.26公式,右乘一个微小位移
 
-    Eigen::Vector3d ang_vel(imu_back.angular_velocity.x, imu_back.angular_velocity.y, imu_back.angular_velocity.z);
-    Eigen::Vector3d u = updateU(unsynced_velocity_, imu_front.time, imu_back.time,
+    Eigen::Vector3d ang_vel = imu_back.gyro;
+    Eigen::Vector3d u = updateU(unsynced_velocity_, imu_front.timestamp, imu_back.timestamp,
                                 ang_vel); //轮子速度在imu方向的投影
     //    Eigen::Vector3d u = updateU(unsynced_velocity_, imu_front.time, imu_back.time);
     T_prev_cur_imu.block(0, 0, 3, 3) << R_prev_cur_imu;
@@ -138,21 +138,18 @@ void DrOdoFlow::WheelVel2IMUVel(VelocityData &vel_data, const Eigen::Vector3d &a
     // If all expressed in IMU coordinate, v_IMU = v_Wheel + ang_vel × r_Wheel_IMU
     Eigen::Matrix3d R_IMU_Wheel = IMU_T_WHEEL_.block<3, 3>(0, 0);
     Eigen::Vector3d r_Wheel_IMU = R_IMU_Wheel * IMU_T_WHEEL_.inverse().block<3, 1>(0, 3); // expressed in IMU coordinate ￥imu_to_wheel_
-    Eigen::Vector3d v_Wheel(vel_data.linear_velocity.x, vel_data.linear_velocity.y,
-                            vel_data.linear_velocity.z); // expressed in Wheel coordinate
+    Eigen::Vector3d v_Wheel = vel_data.vel;                                               // expressed in Wheel coordinate
     Eigen::Vector3d v_IMU = R_IMU_Wheel * v_Wheel + ang_vel.cross(r_Wheel_IMU);
-    vel_data.linear_velocity.x = v_IMU(0);
-    vel_data.linear_velocity.y = v_IMU(1);
-    vel_data.linear_velocity.z = v_IMU(2);
+    vel_data.vel = v_IMU;
 }
 
 Eigen::Vector3d DrOdoFlow::updateU(std::deque<VelocityData> &unsynced_velocity, double front_time, double back_time) {
     std::deque<VelocityData> velocities;
     while (!unsynced_velocity.empty()) {
         VelocityData vel = unsynced_velocity.front();
-        if (vel.time < front_time)
+        if (vel.timestamp < front_time)
             unsynced_velocity.pop_front();
-        else if (vel.time >= front_time && vel.time <= back_time) {
+        else if (vel.timestamp >= front_time && vel.timestamp <= back_time) {
             unsynced_velocity.pop_front();
             velocities.push_back(vel);
         } else
@@ -167,7 +164,7 @@ Eigen::Vector3d DrOdoFlow::updateU(std::deque<VelocityData> &unsynced_velocity, 
     cur_velocity = size > 0 ? cur_velocity / size : cur_velocity;
 
     // 因为轮速记采样过慢，一段时间内认为保持匀速
-    if (abs((front_time + back_time) / 2.0 - nonZeroLast.time) < 0.11 && size == 0) cur_velocity = nonZeroLast;
+    if (abs((front_time + back_time) / 2.0 - nonZeroLast.timestamp) < 0.11 && size == 0) cur_velocity = nonZeroLast;
 
     VelocityData current_velocity_data_ = cur_velocity;
 
@@ -175,7 +172,7 @@ Eigen::Vector3d DrOdoFlow::updateU(std::deque<VelocityData> &unsynced_velocity, 
 
     Eigen::Vector3d temp; //平移增量
 
-    temp = (current_velocity_data_ * (back_time - front_time)).as_vector(); // 新车肯定用轮速计来算速度了
+    temp = (current_velocity_data_ * (back_time - front_time)).vel; // 新车肯定用轮速计来算速度了
 
     return temp;
 }
@@ -185,9 +182,9 @@ Eigen::Vector3d DrOdoFlow::updateU(std::deque<VelocityData> &unsynced_velocity, 
     std::deque<VelocityData> velocities;
     while (!unsynced_velocity.empty()) {
         VelocityData vel = unsynced_velocity.front();
-        if (vel.time < front_time)
+        if (vel.timestamp < front_time)
             unsynced_velocity.pop_front();
-        else if (vel.time >= front_time && vel.time <= back_time) {
+        else if (vel.timestamp >= front_time && vel.timestamp <= back_time) {
             unsynced_velocity.pop_front();
             WheelVel2IMUVel(vel, ang_vel);
             velocities.push_back(vel);
@@ -202,7 +199,7 @@ Eigen::Vector3d DrOdoFlow::updateU(std::deque<VelocityData> &unsynced_velocity, 
     }
     cur_velocity = size > 0 ? cur_velocity / size : cur_velocity;
 
-    if (abs((front_time + back_time) / 2.0 - nonZeroLast.time) < 0.11 && size == 0) {
+    if (abs((front_time + back_time) / 2.0 - nonZeroLast.timestamp) < 0.11 && size == 0) {
         cur_velocity = nonZeroLast;
         WheelVel2IMUVel(cur_velocity, ang_vel);
     }
@@ -210,7 +207,7 @@ Eigen::Vector3d DrOdoFlow::updateU(std::deque<VelocityData> &unsynced_velocity, 
     VelocityData current_velocity_data_ = cur_velocity;
     Eigen::Vector3d temp;
 
-    temp = (current_velocity_data_ * (back_time - front_time)).as_vector();
+    temp = (current_velocity_data_ * (back_time - front_time)).vel;
 
     return temp;
 }

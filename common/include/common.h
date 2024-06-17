@@ -18,6 +18,7 @@ constexpr double kGravity = 9.8;
 const double POSITIVE_INFINITY = std::numeric_limits<double>::infinity();
 enum class Status { kValid,
                     kInvalid };
+
 /**
  * @brief 限制输入为-M_PI-M_PI
  * 
@@ -240,4 +241,21 @@ static Eigen::Matrix3d E3dEulerToMatrix(Eigen::Vector3d angxyz) {
     Eigen::Matrix3d R = R_z * R_y * R_x;
 
     return R;
+}
+inline Eigen::Matrix3d GetSkewMatrix(const Eigen::Vector3d &v) {
+    Eigen::Matrix3d w;
+    w << 0., -v(2), v(1),
+        v(2), 0., -v(0),
+        -v(1), v(0), 0.;
+
+    return w;
+}
+/**
+ * @brief 四元数转旋转矩阵
+ * 
+ */
+static Eigen::Matrix3d QuatToRotMax(Eigen::Quaterniond q) {
+    Eigen::Matrix3d rotation_matrix;
+    rotation_matrix = q.toRotationMatrix();
+    return rotation_matrix;
 }

@@ -74,4 +74,5 @@ private:
     Gnss_With_DrOdom cur_gwd_pos_;
     bool start_alg_ = true;
     std::unique_ptr<LocalCartesianENU> gps2_enu_ptr_;
+    DebugMode ros_wrapper_log_;
 };

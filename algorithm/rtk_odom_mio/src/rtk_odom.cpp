@@ -41,7 +41,7 @@ RTKOdom::RTKOdom(const string &config_file) {
     thd_process = std::thread(&RTKOdom::process_rtk_odom, this);
 
     ofLogOut << "init RTKOdom ok" << endl;
-    rtk_odom_log_.Init("rtk odom", 2, "../log/rtk_odom.log"); //3
+    rtk_odom_log_.Init("rtk odom", 3, "../log/rtk_odom.log"); //3
 }
 RTKOdom::~RTKOdom() {
     start_thd_ = false;
@@ -63,13 +63,29 @@ void RTKOdom::updateOutputPos(const Gnss_With_DrOdom pub_pos) {
 }
 //data
 void RTKOdom::inputGnssMsg(const GnssData &rtk_msg) {
-    mutex_rtk_data_.lock();
-    rtk_buf_.push_back(rtk_msg);
-    RtkDataBuf.push_back(rtk_msg);
-    while (RtkDataBuf.size() > RTK_BUF_SIZE) {
-        RtkDataBuf.pop_front();
+    if (rtk_msg.status == 4) {
+        if (!rtk_stt_.first) {
+            rtk_stt_.second = true;
+            rtk_odom_log_(4, "rtk_turn_fix");
+        } else {
+            rtk_stt_.second = false;
+        }
+        rtk_stt_.first = true;
+        mutex_rtk_data_.lock();
+        rtk_buf_.push_back(rtk_msg);
+        RtkDataBuf.push_back(rtk_msg);
+        while (RtkDataBuf.size() > RTK_BUF_SIZE) {
+            RtkDataBuf.pop_front();
+        }
+        // if (rtk_stt_.second) {
+        //     RtkDataBuf.clear();
+        // }
+        mutex_rtk_data_.unlock();
+    } else {
+        if (rtk_stt_.first)
+            rtk_odom_log_(4, "rtk_turn_float");
+        rtk_stt_.first = false;
     }
-    mutex_rtk_data_.unlock();
 }
 void RTKOdom::inputOdomMsg(const OdometryData &odom_msg) {
     mutex_odom_data_.lock();
@@ -77,6 +93,8 @@ void RTKOdom::inputOdomMsg(const OdometryData &odom_msg) {
     OdomDataBuf.push_back(odom_msg);
     while (OdomDataBuf.size() > RTK_BUF_SIZE * 25)
         OdomDataBuf.pop_front();
+    // if (rtk_stt_.second)
+    //     OdomDataBuf.clear();
     mutex_odom_data_.unlock();
 }
 
@@ -179,21 +197,21 @@ int RTKOdom::convertLLA_insertToHoldList(list<GnssData> &lRtkData, const std::li
     auto itr_rtk = rtk_buf.begin();
     while (itr_rtk != rtk_buf.end()) {
         GnssData gnss_pos;
-        gnss_pos.time = itr_rtk->time;
+        gnss_pos.timestamp = itr_rtk->timestamp;
 
         int ret = 0;
-        if (ret = trans_to_enu_.convertLLA2ENU(itr_rtk->longitude, itr_rtk->latitude, itr_rtk->altitude,
-                                               gnss_pos.x, gnss_pos.y, gnss_pos.z)) {
+        if (ret = trans_to_enu_.convertLLA2ENU(itr_rtk->LonLatAlt.x(), itr_rtk->LonLatAlt.y(), itr_rtk->LonLatAlt.z(),
+                                               gnss_pos.xyz.x(), gnss_pos.xyz.y(), gnss_pos.xyz.z())) {
             lRtkData.push_back(gnss_pos);
         } else if (ret == 0) { //means setOrigin
             if (bfirstRtkFlag) {
                 originRtkPosData = gnss_pos;
                 bfirstRtkFlag = false;
-                ofLogOut << "origin " << gnss_pos.time << " " << gnss_pos.x << " " << gnss_pos.y << " " << gnss_pos.z << std::endl;
+                ofLogOut << "origin " << gnss_pos.timestamp << " " << gnss_pos.xyz.x() << " " << gnss_pos.xyz.y() << " " << gnss_pos.xyz.z() << std::endl;
             }
             lRtkData.push_back(gnss_pos);
         } else {
-            ofLogOut << "fail trans lla " << itr_rtk->time << std::endl;
+            ofLogOut << "fail trans lla " << itr_rtk->timestamp << std::endl;
         }
         itr_rtk++;
     }
@@ -207,10 +225,10 @@ int RTKOdom::convertLLA_insertToHoldList(list<GnssData> &lRtkData, const std::li
 static int queryBestTimeOdom(const GnssData &rtk, const std::list<OdometryData> &lOdomData, OdometryData &outOdom) {
     if (lOdomData.size() == 0)
         return -1;
-    if (lOdomData.back().time <= rtk.time)
+    if (lOdomData.back().time <= rtk.timestamp)
         return -2;
     auto lit = lOdomData.begin();
-    double aim_time_s = rtk.time;
+    double aim_time_s = rtk.timestamp;
     double min_time_s = fabs(lit->time - aim_time_s);
     OdometryData bestOdom = *lit;
     while (lit != lOdomData.end()) {
@@ -219,7 +237,7 @@ static int queryBestTimeOdom(const GnssData &rtk, const std::list<OdometryData> 
             min_time_s = time_diff0;
             bestOdom = *lit;
         }
-        if (lit->time > rtk.time)
+        if (lit->time > rtk.timestamp)
             break;
         lit++;
     }
@@ -245,7 +263,7 @@ int RTKOdom::tryCalcTransOdomToRtk(list<GnssData> &lRtkData, const std::list<Odo
         if (lRtkData.size() == 0)
             ofLogOut << " lRtkData.size()==0" << endl;
         else
-            ofLogOut << " ret_query < 0 " << lRtkData.front().time << " ret_query = " << ret_query << endl;
+            ofLogOut << " ret_query < 0 " << lRtkData.front().timestamp << " ret_query = " << ret_query << endl;
         return -1;
     }
     float min_dist_rtk = 0.05;
@@ -255,7 +273,7 @@ int RTKOdom::tryCalcTransOdomToRtk(list<GnssData> &lRtkData, const std::list<Odo
     std::list<Eigen::Vector3d> lOdomXY, lRtkXY;
 
     //first pair
-    lRtkXY.push_back(Eigen::Vector3d(lit->x, lit->y, 0.0));
+    lRtkXY.push_back(lit->xyz);
     lOdomXY.push_back(Eigen::Vector3d(bestOdom.position(0), bestOdom.position(1), 0.0));
     lSelectOdom.push_back(bestOdom);
     lSelectRtk.push_back(*lit);
@@ -263,13 +281,13 @@ int RTKOdom::tryCalcTransOdomToRtk(list<GnssData> &lRtkData, const std::list<Odo
     GnssData last_rtk = *lit;
 
     while (lit != lRtkData.end()) {
-        float dx = (last_rtk.x - lit->x);
-        float dy = (last_rtk.y - lit->y);
+        float dx = (last_rtk.xyz.x() - lit->xyz.x());
+        float dy = (last_rtk.xyz.y() - lit->xyz.y());
         float dist_ = sqrt(dx * dx + dy * dy);
         if (dist_ > min_dist_rtk) {
             if (0 == queryBestTimeOdom(*lit, lOdomData, bestOdom)) {
                 //paired
-                lRtkXY.push_back(Eigen::Vector3d(lit->x, lit->y, 0));
+                lRtkXY.push_back(lit->xyz);
                 lOdomXY.push_back(Eigen::Vector3d(bestOdom.position(0), bestOdom.position(1), 0.0));
                 lSelectRtk.push_back(*lit);
                 lSelectOdom.push_back(bestOdom);
@@ -282,7 +300,7 @@ int RTKOdom::tryCalcTransOdomToRtk(list<GnssData> &lRtkData, const std::list<Odo
         lit++;
     }
     if (lRtkXY.size() < 13) {
-        ofLogOut << " lRtkXY.size() < 13 " << lRtkData.front().time << " lRtkXY.size() " << lRtkXY.size() << endl;
+        ofLogOut << " lRtkXY.size() < 13 " << lRtkData.front().timestamp << " lRtkXY.size() " << lRtkXY.size() << endl;
         return -1;
     }
 
@@ -349,18 +367,20 @@ void RTKOdom::process_rtk_odom() {
             mutex_output_pos_.unlock();
         }
         if (rtk_buf.size() > 0) {
+            rtk_odom_log_(2, "time1");
             auto itr_rtk = rtk_buf.begin();
             while (itr_rtk != rtk_buf.end()) {
-                Eigen::Vector3d XYZRtkFrame = {itr_rtk->x, itr_rtk->y, 0.0};
+                Eigen::Vector3d XYZRtkFrame = itr_rtk->xyz;
                 double out_yaw1 = 0.0;
                 if (EstimateYawInENU(XYZRtkFrame, out_yaw1)) {
-                    itr_rtk->yaw = out_yaw1;
+                    itr_rtk->rpy[2] = out_yaw1;
                 }
                 lRtkData.push_back(*itr_rtk);
                 itr_rtk++;
             }
+            rtk_odom_log_(2, "time2");
         }
-        while (lRtkData.size() && lRtkData.back().time < lOdomData.front().time) { lRtkData.pop_front(); }
+        while (lRtkData.size() && lRtkData.back().timestamp < lOdomData.front().time) { lRtkData.pop_front(); }
         while (lOdomData.size() && lOdomData.front().time < lOdomData.back().time - 6) { lOdomData.pop_front(); }
 
         if (lRtkData.size() == 0) {
@@ -368,17 +388,19 @@ void RTKOdom::process_rtk_odom() {
             continue;
         }
         if (1) {
+            rtk_odom_log_(2, "time3");
             int ret_try = tryCalcTransOdomToRtk(svd_rtk_buf, svd_odom_buf);
             if (ret_try == 0) {
                 getTransFlag_ = true;
             }
+            rtk_odom_log_(2, "time4");
         }
 
         //got T, and new RTK, pls try output Pose
         auto itr_rtk = lRtkData.begin();
         rtk_odom_log_(1, "calculate rtk");
         while (itr_rtk != lRtkData.end() && lOdomData.size()) {
-            if (itr_rtk->time > lOdomData.back().time) {
+            if (itr_rtk->timestamp > lOdomData.back().time) {
                 break;
             }
             rtk_odom_log_(1, "calculate rtk");
@@ -386,7 +408,7 @@ void RTKOdom::process_rtk_odom() {
             //has aligned
             int ret_cal = calculate_rtk_with_odom(lOdomData, cur_gnss_pos);
             if (ret_cal == -2) { //wait for next odom
-                cerr << fixed << setprecision(6) << " pls wait next odom " << cur_gnss_pos.time << endl;
+                cerr << fixed << setprecision(6) << " pls wait next odom " << cur_gnss_pos.timestamp << endl;
                 break;
             } else if (ret_cal == 0) {
                 updateOutputPos(filtered_pos);
@@ -447,7 +469,7 @@ int RTKOdom::calculate_rtk_with_odom(std::list<OdometryData> &odomData, GnssData
     TmpOdomData.covariance[2] = 0.03;
     TmpOdomData.covariance[5] = 180 * kDeg2Rad; //默认航向误差为180度
     rtk_odom_log_(1, "calculate_rtk_with_odom");
-    while (odomData.size() && odomData.front().time < rtk_pos.time) {
+    while (odomData.size() && odomData.front().time < rtk_pos.timestamp) {
         TmpOdomData = odomData.front(); //rtk的前一帧odom数据
         odomData.pop_front();
     }
@@ -456,27 +478,28 @@ int RTKOdom::calculate_rtk_with_odom(std::list<OdometryData> &odomData, GnssData
         return -2;
     }
     //选则最近的odom作为tmpOdom
-    if ((odomData.front().time - rtk_pos.time) < (rtk_pos.time - TmpOdomData.time))
+    if ((odomData.front().time - rtk_pos.timestamp) < (rtk_pos.timestamp - TmpOdomData.time))
         TmpOdomData = odomData.front();
-    TmpOut = last_odom_pose_.angle_xyz[2]; //默认为上次角度
+    TmpOut = last_odom_pose_.rpy[2]; //默认为上次角度
     filtered_pos.status = 0;
-    filtered_pos.time = rtk_pos.time;
-    TmpYawRtK = rtk_pos.yaw;
-    TmpYawDR = restrict_angle_range(TmpOdomData.angle_xyz[2] + CalAglDif_.second);
+    filtered_pos.time = rtk_pos.timestamp;
+    TmpYawRtK = rtk_pos.rpy[2];
+    TmpYawDR = restrict_angle_range(TmpOdomData.rpy[2] + CalAglDif_.second);
     //将RTK乘以旋转矩阵
     if (abs(TmpYawRtK) < M_PI) {
         TmpOdomData.covariance[5] = 3 * kDeg2Rad; //rtk角度误差3度
         if (getTransFlag_) {
             TmpOdomData.covariance[5] = abs(TmpYawDR - TmpYawRtK);
             std::cout
-                << "DR anguler:" << TmpOdomData.angle_xyz[2]
+                << "DR anguler:" << TmpOdomData.rpy[2]
                 << " ,RTK with DR dif is:" << CalAglDif_.second
                 << " ,DR to Global:" << TmpYawDR
                 << " ,TmpRTKYaw:" << TmpYawRtK
                 << " ,Augler error:" << TmpOdomData.covariance[5] << std::endl;
-            if (TmpOdomData.covariance[5] > 3 * kDeg2Rad) { //rtk误差在30度及延时,是否更新CalAglDif_的值
+            if (TmpOdomData.covariance[5] > 3 * kDeg2Rad) { //rtk误差在3度及延时,是否更新CalAglDif_的值
                 filtered_pos.status = 1;                    //rtk anguler
                 TmpOut = TmpYawRtK;
+                // CalAglDif_.second = TmpYawRtK - TmpOdomData.rpy[2];
             } else {
                 filtered_pos.status = 2; //DR anguler
                 TmpOut = TmpYawDR;
@@ -488,8 +511,8 @@ int RTKOdom::calculate_rtk_with_odom(std::list<OdometryData> &odomData, GnssData
     }
     last_odom_pose_ = TmpOdomData;
     last_rtk_data = rtk_pos;
-    TmpOdomData.position = Eigen::Vector3d{rtk_pos.x, rtk_pos.y, rtk_pos.z};
-    TmpOdomData.angle_xyz[2] = TmpOut;
+    TmpOdomData.position = rtk_pos.xyz;
+    TmpOdomData.rpy[2] = TmpOut;
     filtered_pos.gnss_data = rtk_pos;
     filtered_pos.ref_drOdom = TmpOdomData;
     return 0;
@@ -520,47 +543,57 @@ OdometryData RTKOdom::fusion20ms_with_rtk(
         return tmp_dr_pose;
     }
     OdometryData cur_predict_pos; // for pub, 50Hz;
-    double delta_angule = tmp_dr_pose.angle_xyz[2] - last_dr_pose_.angle_xyz[2];
+    double delta_angule = tmp_dr_pose.rpy[2] - last_dr_pose_.rpy[2];
     if (align_rtk_dr.status == 1 && g_align_pose_update) { //rtk准确,更新直接更新,未更新直接递推
         if (dr_que_.size()) {
             while (dr_que_.size()) {
                 if (dr_que_.front().time > align_rtk_dr.time) {
-                    cur_predict_pos.angle_xyz[2] = align_rtk_dr.gnss_data.yaw + dr_que_.back().angle_xyz[2] - dr_que_.front().angle_xyz[2];
+                    cur_predict_pos.rpy[2] = align_rtk_dr.gnss_data.rpy[2] + dr_que_.back().rpy[2] - dr_que_.front().rpy[2];
                     break;
                 } else {
                     dr_que_.pop_front();
                 }
             }
         } else
-            cur_predict_pos.angle_xyz[2] = align_rtk_dr.gnss_data.yaw; //+ 0.9 * (last_predict_pose_.angle_xyz[2] + delta_angule);
-        rtk_odom_log_(2, "rtk yaw is right:" + to_string(cur_predict_pos.angle_xyz[2]));
+            cur_predict_pos.rpy[2] = align_rtk_dr.gnss_data.rpy[2]; //+ 0.9 * (last_predict_pose_.angle_xyz[2] + delta_angule);
+        rtk_odom_log_(3, "rtk yaw is right:" + to_string(cur_predict_pos.rpy[2]));
     } else if (align_rtk_dr.status == 2) { //rtk与dr相差较小,CalAglDif_误差小,更新
-        cur_predict_pos.angle_xyz[2] = tmp_dr_pose.angle_xyz[2] + CalAglDif_.second;
-        rtk_odom_log_(2, "CalAglDif is right:" + to_string(cur_predict_pos.angle_xyz[2]));
+        cur_predict_pos.rpy[2] = tmp_dr_pose.rpy[2] + CalAglDif_.second;
+        rtk_odom_log_(3, "CalAglDif is right:" + to_string(cur_predict_pos.rpy[2]));
     } else {
-        cur_predict_pos.angle_xyz[2] = last_predict_pose_.angle_xyz[2] + delta_angule; //预测
+        cur_predict_pos.rpy[2] = last_predict_pose_.rpy[2] + delta_angule; //预测
     }
-    Eigen::Vector3d delta_pos = E3dEulerToMatrix(cur_predict_pos.angle_xyz) * (Eigen::Vector3d((tmp_dr_pose.position - last_dr_pose_.position).norm(), 0.0, 0.0));
+    Eigen::Vector3d delta_pos = E3dEulerToMatrix(cur_predict_pos.rpy) * (Eigen::Vector3d((tmp_dr_pose.position - last_dr_pose_.position).norm(), 0.0, 0.0));
     if (g_align_pose_update) {
-        cur_predict_pos.position[0] = align_rtk_dr.gnss_data.x;
-        cur_predict_pos.position[1] = align_rtk_dr.gnss_data.y;
-        cur_predict_pos.position[2] = align_rtk_dr.gnss_data.z;
+        cur_predict_pos.position = align_rtk_dr.gnss_data.xyz;
     } else {
         Eigen::Matrix3d J_prev_cur_imu = Eigen::Matrix3d::Identity();
-        if (abs(last_predict_pose_.angle_xyz[2] - cur_predict_pos.angle_xyz[2]) > 0.00001) {
-            Eigen::Matrix3d R_prev_cur_imu = E3dEulerToMatrix(last_predict_pose_.angle_xyz).transpose() * E3dEulerToMatrix(cur_predict_pos.angle_xyz); // Imu获取角度估计,计算变化值
+        if (abs(last_predict_pose_.rpy[2] - cur_predict_pos.rpy[2]) > 0.00001) {
+            Eigen::Matrix3d R_prev_cur_imu = E3dEulerToMatrix(last_predict_pose_.rpy).transpose() * E3dEulerToMatrix(cur_predict_pos.rpy); // Imu获取角度估计,计算变化值
             Eigen::AngleAxisd delta_se3(R_prev_cur_imu);
             double phi = delta_se3.angle();
             Eigen::Vector3d axis = delta_se3.axis();
             if (abs(phi) > 0.00001)
                 J_prev_cur_imu = sin(phi) / phi * Eigen::Matrix3d::Identity() + (1 - sin(phi) / phi) * axis * axis.transpose() + ((1 - cos(phi)) / phi) * skew(axis); //视觉14讲，p73 4.26公式,右乘一个微小位移
         }
-        cur_predict_pos.position = last_predict_pose_.position + J_prev_cur_imu * delta_pos;
+        delta_pos = J_prev_cur_imu * delta_pos;
+        cur_predict_pos.position = last_predict_pose_.position + delta_pos;
+    }
+    if (g_align_pose_update) {
+        Eigen::Vector3d update_data = {cur_predict_pos.position.x(), cur_predict_pos.position.y(), cur_predict_pos.rpy[2]};
+        eskf_fusion_.update(update_data);
+    } else {
+        Eigen::Vector3d delta_pos12 = {delta_pos.x(), delta_pos.y(), delta_angule};
+        eskf_fusion_.predict(delta_pos12);
+    }
+    if (0) {
+        cur_predict_pos.position << eskf_fusion_.x.x(), eskf_fusion_.x.y(), 0.0;
+        cur_predict_pos.rpy.z() = eskf_fusion_.x.z();
     }
     last_predict_pose_ = cur_predict_pos;
     last_align_rtk_dr_pos_ = align_rtk_dr;
-    cur_predict_pos.angle_xyz[0] = 0;
-    cur_predict_pos.angle_xyz[1] = 0;
+    cur_predict_pos.rpy[0] = 0;
+    cur_predict_pos.rpy[1] = 0;
     last_dr_pose_ = tmp_dr_pose;
     if (std::isnan(cur_predict_pos.position(0)) || std::isinf(cur_predict_pos.position(0))) {
         std::cout << "cur position:" << cur_predict_pos.position << std::endl;
@@ -569,19 +602,23 @@ OdometryData RTKOdom::fusion20ms_with_rtk(
     OdometryData pub_pose =
         OdometryData(
             cur_predict_pos.time, "rtk_with_dr", cur_predict_pos.position,
-            euler3d_to_quaternion(cur_predict_pos.angle_xyz));
+            euler3d_to_quaternion(cur_predict_pos.rpy));
 
     return pub_pose;
 }
 bool RTKOdom::EstimateYawInENU(Eigen::Vector3d in_pose, double &out_yaw) {
     bool tmp_ret = false;
-    double tmp_length = (g_last_rtk - in_pose).norm();
-    double ang_err = 0.5;
-    double len_dis = 0.25;
+    double ang_err = 1.0;
+    double len_dis = 0.15;
     if (!getTransFlag_)
         ang_err = 3.0;
     if (!getTransFlag_)
         len_dis = 0.05;
+    if (rtk_stt_.second) {
+        g_last_rtk = in_pose;
+        rtk_odom_log_(4, "rtk_turn_fix,donot estimator yaw");
+    }
+    double tmp_length = (g_last_rtk - in_pose).norm();
     if (tmp_length > len_dis && tmp_length < 0.8) {
         est_yaw[1] = atan2(in_pose[1] - g_last_rtk[1], in_pose[0] - g_last_rtk[0]) * 180.0 / M_PI;
         if (abs(est_yaw[1] - est_yaw[0]) < ang_err) {

@@ -13,56 +13,9 @@
 #include "sensor_type.h"
 #include "trans_rtk_enu.h"
 #include <utility>
+#include "eskf.hpp"
 using namespace sensor_msgs_z;
 namespace rtk_odom_component {
-class EKF {
-public:
-    Eigen::VectorXd x;  // 状态向量 [x, y, yaw]
-    Eigen::MatrixXd P;  // 状态协方差矩阵
-    Eigen::MatrixXd Q;  // 过程噪声协方差矩阵
-    Eigen::Matrix3d R1; // 定义观测噪声协方差矩阵
-    Eigen::Matrix3d R2;
-
-    EKF() {
-        x = Eigen::VectorXd(3); // [x, y, yaw]
-        x << 0, 0, 0;
-
-        P = Eigen::MatrixXd::Identity(3, 3);
-
-        Q = 0.01 * Eigen::MatrixXd::Identity(3, 3);
-        R1 << 0.03 * 0.03, 0, 0,
-            0, 0.03 * 0.03, 0,
-            0, 0, (3.0 * M_PI / 180.0) * (3.0 * M_PI / 180.0);
-        R2 << 0.03 * 0.03, 0, 0,
-            0, 0.03 * 0.03, 0,
-            0, 0, (2.0 * M_PI / 180.0) * (2.0 * M_PI / 180.0);
-    }
-
-    void predict(const Eigen::Vector3d &delta_x) {
-        // 状态转移矩阵 F
-        Eigen::MatrixXd F = Eigen::MatrixXd::Identity(3, 3);
-
-        // 状态预测
-        x = F * x + delta_x; //变化值
-        // 状态协方差预测
-        P = F * P * F.transpose() + Q;
-    }
-
-    void update(const Eigen::Vector3d &z, const Eigen::Matrix3d &R) {
-        // 观测矩阵 H
-        Eigen::MatrixXd H = Eigen::MatrixXd::Identity(3, 3);
-        // 创新
-        Eigen::VectorXd y = z - H * x;
-        // 创新协方差
-        Eigen::MatrixXd S = H * P * H.transpose() + R;
-        // 卡尔曼增益
-        Eigen::MatrixXd K = P * H.transpose() * S.inverse();
-        // 状态更新
-        x = x + K * y;
-        // 状态协方差更新
-        P = (Eigen::MatrixXd::Identity(3, 3) - K * H) * P;
-    }
-};
 
 class RTKOdom {
 public:
@@ -78,8 +31,8 @@ public:
         OdometryData &dr_update_pose, //dr_odom更新数据
         Gnss_With_DrOdom &align_rtk_dr_pose);
     const int RTK_BUF_SIZE = 31;
-    EKF rtk_fusion_dr_;
     DebugMode rtk_odom_log_;
+    ESKF eskf_fusion_;
 
 private:
     int calculate_rtk_with_odom(std::list<OdometryData> &odomData, GnssData &rtk_pos);
@@ -126,6 +79,7 @@ private:
     std::thread thd_process;
     bool start_thd_ = true;
     Gnss_With_DrOdom last_align_rtk_dr_pos_;
+    std::pair<bool, bool> rtk_stt_ = std::make_pair(true, false); //first status,second turn
 
     OdometryData last_predict_pose_;
     std::deque<OdometryData> dr_que_;

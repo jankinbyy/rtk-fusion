@@ -119,11 +119,11 @@ void DrOdoFlow2::setWheel(double time_s, double vel_linear,
 }
 
 // roll pitch yaw,anguler speed
-Eigen::Matrix<double, 6, 1> DrOdoFlow2::processImu(double time_s,
-                                                   const Eigen::Matrix<double, 6, 1> imu,
-                                                   bool bStatic) {
-    Eigen::Matrix<double, 6, 1> tmp_rpy_anguler;
-    tmp_rpy_anguler(0) = POSITIVE_INFINITY;
+sensor_msgs_z::IMUData DrOdoFlow2::processImu(double time_s,
+                                              const Eigen::Matrix<double, 6, 1> imu,
+                                              bool bStatic) {
+    sensor_msgs_z::IMUData tmp_imu_data;
+    tmp_imu_data.efficient = false;
     auto t1 = std::chrono::steady_clock::now();
     Eigen::Vector3d acc = imu.head(3);
     Eigen::Vector3d gyro = imu.tail(3); // * ratio,
@@ -151,12 +151,13 @@ Eigen::Matrix<double, 6, 1> DrOdoFlow2::processImu(double time_s,
             acc = (mRviEst * acc).eval();
         }
     }
-    tmp_rpy_anguler.tail<3>() = gyro;
-    //            if (curTime - mLastImuTime < 0.01) continue;
+    tmp_imu_data.gyro = gyro;
+    tmp_imu_data.acc = acc;
     if (mLastImuTime > 0.01 && (time_s - mLastImuTime < 0.2)) {
         Eigen::Vector3d mRPYLast = updateIMU(gyro(0), gyro(1), gyro(2), acc(0), acc(1), acc(2),
                                              time_s - mLastImuTime);
-        tmp_rpy_anguler.head<3>() = mRPYLast;
+        tmp_imu_data.rpy = mRPYLast;
+        tmp_imu_data.efficient = true;
     } else if (!mbGetRviEst) {
         Eigen::Quaterniond quat;
         quat.setFromTwoVectors(Eigen::Vector3d(acc(0), acc(1), acc(2)),
@@ -168,15 +169,14 @@ Eigen::Matrix<double, 6, 1> DrOdoFlow2::processImu(double time_s,
     }
 
     mLastImuTime = time_s;
-    return tmp_rpy_anguler;
+    return tmp_imu_data;
 }
 
 void DrOdoFlow2::processWheel() {
     double wheel_before_time = 0.0;
     double imu_back_time = 0.0;
     double time_s = 0.0, vel_linear = 0.0, vel_angular = 0.0;
-    Eigen::Matrix<double, 6, 1> imu_result;
-    imu_result(0) = POSITIVE_INFINITY;
+    sensor_msgs_z::IMUData imu_result;
     while (!mqWheelBuffer.empty() && !mqIMUBuffer.empty()) {
         {
             std::unique_lock<std::mutex> lock_wheel(mWheelDataMutex);
@@ -204,27 +204,28 @@ void DrOdoFlow2::processWheel() {
                     double data_time = mqIMUBuffer.front().first;
                     lock_imu.unlock();
                     imu_result = processImu(data_time, data_imu, bStatic);
-                    if (imu_result(0) != POSITIVE_INFINITY) {
+                    if (imu_result.efficient) {
                         std::unique_lock<std::shared_timed_mutex> lock_pose(get_pose_mutex_);
                         Odom_.time = time_s;
                         Odom_.topic = "dr2_result";
-                        Odom_.gyro = imu_result.tail<3>();
-                        Odom_.angle_xyz = imu_result.head<3>();
-                        Odom_.R_Mat = eulerAnglesToRotationMatrix(Odom_.angle_xyz);
-                        Odom_.rotation = euler3d_to_quaternion(Odom_.angle_xyz);
+                        Odom_.acc = imu_result.acc;
+                        Odom_.gyro = imu_result.gyro;
+                        Odom_.rpy = imu_result.rpy;
+                        Odom_.R_Mat = eulerAnglesToRotationMatrix(Odom_.rpy);
+                        Odom_.rotation = euler3d_to_quaternion(Odom_.rpy);
                     }
                     lock_imu.lock();
                     mqIMUBuffer.pop_front();
                 }
             }
             double dDist = (time_s - mLastWheelTime) * vel_linear;
-            if (imu_result(0) != POSITIVE_INFINITY) {
-                mXOdom += cos(imu_result(2)) * dDist;
-                mYOdom += sin(imu_result(2)) * dDist;
+            if (imu_result.efficient) {
+                mXOdom += cos(imu_result.rpy(2)) * dDist;
+                mYOdom += sin(imu_result.rpy(2)) * dDist;
                 mLastWheelTime = time_s;
                 Twv_p(0, 3) = mXOdom;
                 Twv_p(1, 3) = mYOdom;
-                Eigen::Vector3d rpy_res = imu_result.head<3>();
+                Eigen::Vector3d rpy_res = imu_result.rpy;
                 Twv_p.block<3, 3>(0, 0) = eulerAnglesToRotationMatrix(rpy_res);
                 mTwi = Twv_p * mTvi;
             }
@@ -236,8 +237,8 @@ void DrOdoFlow2::processWheel() {
             }
             if (time_s > 0)
                 fTestWheelOdom << std::fixed << std::setprecision(3) << time_s << " "
-                               << mXOdom << " " << mYOdom << " 0 " << imu_result(0) << " "
-                               << imu_result(1) << " " << imu_result(2) << " 0" << endl;
+                               << mXOdom << " " << mYOdom << " 0 " << imu_result.rpy(0) << " "
+                               << imu_result.rpy(1) << " " << imu_result.rpy(2) << endl;
         } else {
             mLastWheelTime = time_s;
         }
@@ -270,7 +271,7 @@ double DrOdoFlow2::radiansToDegrees(double radians) {
     return radians * (180.0 / M_PI);
 }
 
-// by mahony
+// Mahony互补滤波算法
 Eigen::Vector3d DrOdoFlow2::updateIMU(double gx, double gy, double gz,
                                       double ax, double ay, double az,
                                       double dT) {
@@ -281,17 +282,18 @@ Eigen::Vector3d DrOdoFlow2::updateIMU(double gx, double gy, double gz,
     double halfvx = m_q1 * m_q3 - m_q0 * m_q2;
     double halfvy = m_q0 * m_q1 + m_q2 * m_q3;
     double halfvz = m_q0 * m_q0 - 0.5 + m_q3 * m_q3;
+    //差积误差
     double halfex = (ay * halfvz - az * halfvy);
     double halfey = (az * halfvx - ax * halfvz);
     double halfez = (ax * halfvy - ay * halfvx);
-
+    //差积误差积分为角速度
     mIntegralFBx += mKi * halfex * dT;
     mIntegralFBy += mKi * halfey * dT;
     mIntegralFBz += mKi * halfez * dT;
     gx += mIntegralFBx;
     gy += mIntegralFBy;
     gz += mIntegralFBz;
-
+    //角度补偿
     gx += mKp * halfex;
     gy += mKp * halfey;
     gz += mKp * halfez;
@@ -302,30 +304,23 @@ Eigen::Vector3d DrOdoFlow2::updateIMU(double gx, double gy, double gz,
     const double qa = m_q0;
     const double qb = m_q1;
     const double qc = m_q2;
+    //更新四元数
     m_q0 += (-qb * gx - qc * gy - m_q3 * gz);
     m_q1 += (qa * gx + qc * gz - m_q3 * gy);
     m_q2 += (qa * gy - qb * gz + m_q3 * gx);
     m_q3 += (qa * gz + qb * gy - qc * gx);
-
+    //单位化四元数
     recipNorm = sqrt(m_q0 * m_q0 + m_q1 * m_q1 + m_q2 * m_q2 + m_q3 * m_q3);
     m_q0 /= recipNorm;
     m_q1 /= recipNorm;
     m_q2 /= recipNorm;
     m_q3 /= recipNorm;
-
+    //四元数反解欧拉角
     double roll =
         atan2(m_q0 * m_q1 + m_q2 * m_q3, 0.5 - m_q1 * m_q1 - m_q2 * m_q2);
     double pitch = asin(-2.0 * (m_q1 * m_q3 - m_q0 * m_q2));
     double yaw =
         atan2(m_q1 * m_q2 + m_q0 * m_q3, 0.5 - m_q2 * m_q2 - m_q3 * m_q3);
-
-    //    static int logCnt = 0;
-    //    logCnt++;
-    //    if (logCnt % 1000 == 0) {
-    //        cout << "roll=" << roll << ",  pitch=" << pitch << ",   yaw=" << yaw
-    //        << endl;
-    //    }
-
     return {roll, pitch, yaw};
 }
 

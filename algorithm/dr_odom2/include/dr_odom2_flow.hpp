@@ -28,7 +28,6 @@ Taojing.Zhang@positecgroup.com
 #include <thread>
 #include <shared_mutex>
 #include "sensor_type.h"
-#include "common.h"
 
 namespace DROdom2 {
 /**
@@ -65,8 +64,8 @@ private:
     Eigen::Matrix<double, 4, 4> Twv_p = Eigen::Matrix<double, 4, 4>::Identity();
 
 private:
-    Eigen::Matrix<double, 6, 1> processImu(double time_s, const Eigen::Matrix<double, 6, 1> imu,
-                                           bool bStatic);
+    sensor_msgs_z::IMUData processImu(double time_s, const Eigen::Matrix<double, 6, 1> imu,
+                                      bool bStatic);
 
     void processWheel();
 
