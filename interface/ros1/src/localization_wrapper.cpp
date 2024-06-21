@@ -14,13 +14,11 @@ LocalizationWrapper::LocalizationWrapper(ros::NodeHandle &nh) {
     file_gps_.open(log_folder + "/gps.csv");
     ros_wrapper_log_.Init("ros_wrapper", 3, "../log/ros_wrapp.log");
     // Initialization imu gps localizer.
-    Eigen::Matrix4d mTvi = Eigen::Matrix4d::Identity();
-    mTvi << 0, -1, 0, 0.0000, 1, 0, 0, -0.812, 0, 0, 1, -0.483, 0, 0, 0,
-        1; // imu_T_wheel
-    matrix_body_to_wheel_ = mTvi;
-    imu_wheel_loc_ptr_ = std::make_unique<DrOdoFlow>(mTvi.inverse());
+    Eigen::Matrix4d imu_t_wheel = Config::imu_T_wheel_;
+    matrix_body_to_wheel_ = imu_t_wheel;
+    imu_wheel_loc_ptr_ = std::make_unique<DrOdoFlow>(imu_t_wheel);
     imu_wheel_localizer_ptr_ =
-        std::make_unique<DROdom2::DrOdoFlow2>(mTvi.inverse());
+        std::make_unique<DROdom2::DrOdoFlow2>(imu_t_wheel);
     filterangle_odom_rtk_ptr_ =
         std::make_shared<rtk_odom_component::RTKOdom>(config_file);
     gps2_enu_ptr_ = std::make_unique<LocalCartesianENU>();
@@ -34,7 +32,7 @@ LocalizationWrapper::LocalizationWrapper(ros::NodeHandle &nh) {
     odom1_pub_ = nh.advertise<nav_msgs::Path>("odom1_path", 10);
     rtk_dr_pub_ = nh.advertise<nav_msgs::Path>("rtk_dr_path", 10);
     rtk_true_pub_ = nh.advertise<nav_msgs::Path>("rtk_true_path", 10);
-    odom_pub_ = nh.advertise<nav_msgs::Odometry>("odom", 50);
+    odom_pub_ = nh.advertise<nav_msgs::Odometry>("/dr2_odom/odom", 50);
     run_thread_ = std::thread(&LocalizationWrapper::Evaluate, this);
     run_thread_rtk_ = std::thread(&LocalizationWrapper::EvaluateRTK, this);
 }
@@ -170,12 +168,9 @@ void LocalizationWrapper::GpsPositionCallback(
     const sensor_msgs::NavSatFixConstPtr &gps_msg_ptr) {
     // Check the gps_status.
     int gps_status = gps_msg_ptr->status.status;
-    if (gps_msg_ptr->position_covariance[0] + gps_msg_ptr->position_covariance[4] > 0.003) { // RTK 噪声过大，认为是不可信的 fixme:是否存在中间的临界状态？
+    if (gps_msg_ptr->position_covariance[0] + gps_msg_ptr->position_covariance[4] > 0.005) { // RTK 噪声过大，认为是不可信的 fixme:是否存在中间的临界状态？
         gps_status = 2;
     }
-    // if (gps_status != 4) {
-    //     return;
-    // }
     if (last_reveive_rtk_time == gps_msg_ptr->header.stamp.toSec()) return;
     ros_wrapper_log_(2, "input_gps");
     Eigen::Matrix<double, 7, 1> pose_out;
@@ -185,9 +180,22 @@ void LocalizationWrapper::GpsPositionCallback(
         ConvertStateToRosTopic(pose_out, rtk_true_path_);
         rtk_true_pub_.publish(rtk_true_path_);
     }
-    GnssData gps_data(
-        gps_msg_ptr->header.stamp.toSec(), gps_msg_ptr->longitude, gps_msg_ptr->latitude, gps_msg_ptr->altitude, pose_out[1], pose_out[2], pose_out[3], gps_status,
-        gps_msg_ptr->status.service);
+    Eigen::Matrix3d cov;
+    cov(0, 0) = gps_msg_ptr->position_covariance[0];
+    cov(0, 1) = gps_msg_ptr->position_covariance[1];
+    cov(0, 2) = gps_msg_ptr->position_covariance[2];
+    cov(1, 0) = gps_msg_ptr->position_covariance[3];
+    cov(1, 1) = gps_msg_ptr->position_covariance[4];
+    cov(1, 2) = gps_msg_ptr->position_covariance[5];
+    cov(2, 0) = gps_msg_ptr->position_covariance[6];
+    cov(2, 1) = gps_msg_ptr->position_covariance[7];
+    cov(2, 2) = gps_msg_ptr->position_covariance[8];
+    GnssData gps_data(gps_msg_ptr->header.stamp.toSec(),
+                      gps_msg_ptr->longitude, gps_msg_ptr->latitude, gps_msg_ptr->altitude,
+                      pose_out[1], pose_out[2], pose_out[3],
+                      cov,
+                      gps_status,
+                      gps_msg_ptr->status.service);
     {
         std::unique_lock<std::shared_timed_mutex> lock_rtk(rtk_dr_mutex_);
         rtk_buf_.push_back(gps_data);

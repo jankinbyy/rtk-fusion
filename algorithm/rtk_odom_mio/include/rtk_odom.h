@@ -14,6 +14,7 @@
 #include "trans_rtk_enu.h"
 #include <utility>
 #include "eskf.hpp"
+#include "config.h"
 using namespace sensor_msgs_z;
 namespace rtk_odom_component {
 
@@ -27,12 +28,11 @@ public:
     void inputOdomMsg(const OdometryData &odom_msg);
     Gnss_With_DrOdom getFilteredRtk();
     OdometryData getOdometry();
-    OdometryData fusion20ms_with_rtk(
-        OdometryData &dr_update_pose, //dr_odom更新数据
-        Gnss_With_DrOdom &align_rtk_dr_pose);
+    void CalRtkYaw(list<GnssData> &_rtk_buf, list<GnssData> &_lRtkData);
+    OdometryData sync_dr_rtk(OdometryData &dr_update_pose, Gnss_With_DrOdom &align_rtk_dr_pose);
     const int RTK_BUF_SIZE = 31;
     DebugMode rtk_odom_log_;
-    ESKF eskf_fusion_;
+    std::shared_ptr<ESKF> eskf_fusion_ = nullptr;
 
 private:
     int calculate_rtk_with_odom(std::list<OdometryData> &odomData, GnssData &rtk_pos);
@@ -67,7 +67,8 @@ private:
     bool getTransFlag_ = false;
     Eigen::Matrix<double, 4, 4> T_rtkToOdom = Eigen::Matrix<double, 4, 4>::Identity();
     Eigen::Matrix<double, 4, 4> T_OdomToRtk = Eigen::Matrix<double, 4, 4>::Identity();
-    std::pair<double, double> CalAglDif_ = std::make_pair(0.0, 0.0);
+    Eigen::Matrix4d IMU_T_ENU_ = Eigen::Matrix4d::Identity(); //Imu到enu坐标系的变换矩阵
+    double true_dif_ = 0.0;
     double error_sum;
     Eigen::Vector3d g_last_rtk = {-1000, -1000, -1000};
     double est_yaw[2] = {-1000, -1000};

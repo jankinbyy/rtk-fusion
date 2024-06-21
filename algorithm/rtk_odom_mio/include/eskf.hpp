@@ -2,146 +2,381 @@
 #include "sensor_type.h"
 using namespace sensor_msgs_z;
 class ESKF {
+private:
+    static const unsigned int DIM_STATE = 15;
+    static const unsigned int DIM_STATE_NOISE = 6;       // 噪声只有6维，陀螺仪和加速度计的bias
+    static const unsigned int DIM_MEASUREMENT = 3;       // 观测向量只有6维
+    static const unsigned int DIM_MEASUREMENT_NOISE = 3; // 观测噪声
+
+    static const unsigned int INDEX_STATE_POSI = 0;      // 位置
+    static const unsigned int INDEX_STATE_VEL = 3;       // 速度
+    static const unsigned int INDEX_STATE_ORI = 6;       // 角度
+    static const unsigned int INDEX_STATE_GYRO_BIAS = 9; // 陀螺仪bias
+    static const unsigned int INDEX_STATE_ACC_BIAS = 12; // 加速度计bias
+    static const unsigned int INDEX_MEASUREMENT_POSI = 0;
+
+    typedef typename Eigen::Matrix<double, DIM_STATE, 1> TypeVectorX;               // 状态向量
+    typedef typename Eigen::Matrix<double, DIM_MEASUREMENT, 1> TypeVectorY;         // 观测向量 GPS的位置
+    typedef typename Eigen::Matrix<double, DIM_STATE, DIM_STATE> TypeMatrixF;       //15*15
+    typedef typename Eigen::Matrix<double, DIM_STATE, DIM_STATE_NOISE> TypeMatrixB; //15*6
+    typedef typename Eigen::Matrix<double, DIM_STATE_NOISE, 1> TypeMatrixW;         //6*1 陀螺仪和加速度计噪声
+    typedef typename Eigen::Matrix<double, DIM_STATE_NOISE, DIM_STATE_NOISE> TypeMatrixQ;
+    typedef typename Eigen::Matrix<double, DIM_STATE, DIM_STATE> TypeMatrixP;
+    typedef typename Eigen::Matrix<double, DIM_STATE, DIM_MEASUREMENT> TypeMatrixK;
+    typedef typename Eigen::Matrix<double, DIM_MEASUREMENT_NOISE, DIM_MEASUREMENT_NOISE> TypeMatrixC;
+    typedef typename Eigen::Matrix<double, DIM_MEASUREMENT, DIM_STATE> TypeMatrixH;
+    typedef typename Eigen::Matrix<double, DIM_MEASUREMENT, DIM_MEASUREMENT> TypeMatrixR;
+
+    TypeVectorX X_; //估计的状态变化量,P_enu,V_enu,,R_enu_t_imu,R_enu_bg,R_enu_ba
+    TypeVectorY Y_; //rtk观测误差
+    TypeMatrixF F_; //雅可比矩阵
+    TypeMatrixB B_; //噪声转移矩阵
+    TypeMatrixW W_; //过程噪声
+    TypeMatrixQ Q_; //过程噪声协方差矩阵
+    TypeMatrixP P_; //状态估计的协方差矩阵，表示对当前状态估计的不确定性。随着EKF迭代过程的进行，这个矩阵被更新以反映估计的精确度
+    TypeMatrixK K_; //卡尔曼增益
+    TypeMatrixC C_; //测量噪声协方差矩阵
+    TypeMatrixH H_; //观测协方差矩阵
+    TypeMatrixC R_; //测量噪声 rtk
+
+    TypeMatrixF Ft_;
+
+    Eigen::Vector3d init_velocity_ = Eigen::Vector3d::Zero();
+    State state_;
+    Eigen::Matrix4d init_pose_ = Eigen::Matrix4d::Identity();
+
+    Eigen::Vector3d g_; //重力加速度
+    Eigen::Vector3d w_; //地球自传角速度
+
+    GnssData curr_gps_data_;
+
+    double L_ = 0.0; //纬度
+
+    std::deque<OdometryData> imu_data_buff_; // 只保存两个IMU数据
+    bool init_ = false;
+    Eigen::Matrix4d imu_t_wheel_;
+
 public:
-    ESKF() {
-        x = Eigen::VectorXd(3); // [x, y, yaw]
-        x << 0, 0, 0;
-        P = Eigen::MatrixXd::Identity(3, 3);
-        Q = 0.1 * 0.1 * Eigen::MatrixXd::Identity(3, 3);
-        R1 << 0.02 * 0.02, 0, 0,
-            0, 0.02 * 0.02, 0,
-            0, 0, (5.0 * M_PI / 180.0) * (5.0 * M_PI / 180.0);
+    ESKF(Eigen::Matrix4d _imu_t_wheel) :
+        imu_t_wheel_(_imu_t_wheel) {
+        double gravity = 9.7;
+        double earth_rotation_speed = 7.2921151467e-05;
+        L_ = 32.0;
+        double cov_prior_posi = 0.001;
+        double cov_prior_vel = 0.001;
+        double cov_prior_ori = 0.001;
+        double cov_prior_epsilon = 0.001;
+        double cov_prior_delta = 0.01;
+        double cov_measurement_posi = 0.0001;
+        double cov_process_gyro = 0.001;
+        double cov_process_accel = 0.01;
+        double cov_w_gyro = 0.001; // IMU数据的噪声，用来组成W矩阵
+        double cov_w_accel = 0.01;
+        g_ = Eigen::Vector3d(0.0, 0.0, -gravity);
+        w_ = Eigen::Vector3d(0.0, earth_rotation_speed * cos(L_ * kDeg2Rad),
+                             earth_rotation_speed * sin(L_ * kDeg2Rad)); // w_ie_n
+
+        SetCovarianceP(cov_prior_posi, cov_prior_vel, cov_prior_ori,
+                       cov_prior_epsilon, cov_prior_delta);
+        SetCovarianceR(cov_measurement_posi);
+        SetCovarianceQ(cov_process_gyro, cov_process_accel);
+        SetCovarianceW(cov_w_gyro, cov_w_accel);
+
+        X_.setZero();     // 初始化为零矩阵
+        F_.setZero();     // 初始化为零矩阵
+        C_.setIdentity(); // 单位矩阵
+        H_.block<3, 3>(INDEX_MEASUREMENT_POSI, INDEX_MEASUREMENT_POSI) = Eigen::Matrix3d::Identity();
+
+        F_.block<3, 3>(INDEX_STATE_POSI, INDEX_STATE_VEL) = Eigen::Matrix3d::Identity(); // ?矩阵
+        F_.block<3, 3>(INDEX_STATE_ORI, INDEX_STATE_ORI) = GetSkewMatrix(-w_);
     };
-    State state;
-    Eigen::VectorXd x;  // 状态向量 [x, y, yaw]
-    Eigen::MatrixXd P;  // 状态协方差矩阵
-    Eigen::MatrixXd Q;  // 过程噪声协方差矩阵
-    Eigen::Matrix3d R1; // 定义观测噪声协方差矩阵
-    const double acc_noise_ = 0.02;
-    const double gyro_noise_ = 0.02;
-    const double acc_bias_noise_ = 0.02;
-    const double gyro_bias_noise_ = 0.02;
-    const Eigen::Vector3d I_p_Gps_ = {0.1, 0.1, 0.0};
-    const Eigen::Vector3d gravity_ = {0.0, 0.0, -9.7};
-    OdometryData last_odom_;
-    void predict(const Eigen::Vector3d &delta_x) {
-        // 状态转移矩阵 F
-        Eigen::MatrixXd F = Eigen::MatrixXd::Identity(3, 3);
 
-        // 状态预测
-        x = F * x + delta_x; //变化值
-        // 状态协方差预测
-        P = F * P * F.transpose() + Q; //Q为观测噪声
-    }
+    /*!
+     * 用于ESKF滤波器的初始化，设置初始位姿，初始速度
+     * @param curr_gps_data 与imu时间同步的gps数据
+     * @param curr_imu_data 与gps时间同步的imu数据
+     * @return
+     */
+    bool Init(const GnssData &curr_gps_data, const OdometryData &curr_imu_data) {
+        if (!init_) {
+            init_velocity_ = curr_imu_data.twist; // 用真实速度初始化
+            state_.G_v_I = init_velocity_;
+            // imu为右前上 rtk为东北天,绕z轴旋转
+            double angle = curr_gps_data.rpy.z(); // 60度 = π/3 弧度
 
-    void update(const Eigen::Vector3d &z) {
-        // 观测矩阵 H
-        Eigen::MatrixXd H = Eigen::MatrixXd::Identity(3, 3);
-        // 创新协方差
-        Eigen::MatrixXd S = H * P * H.transpose() + R1;
-        // 卡尔曼增益
-        Eigen::MatrixXd K = P * H.transpose() * S.inverse();
-        // 状态更新
-        x = x + K * (z - H * x);
-        // 状态协方差更新
-        P = (Eigen::MatrixXd::Identity(3, 3) - K * H) * P;
-    }
-    void Predict(const OdometryData cur_input) {
-        // Time.
-        if (last_odom_.time > 0) {
-            double delta_t = cur_input.time - last_odom_.time;
-            const double delta_t2 = delta_t * delta_t;
+            // 使用 AngleAxis 定义绕z轴的旋转
+            Eigen::AngleAxisd rotation(angle, Eigen::Vector3d::UnitZ());
 
-            // Set last state.
-            State last_state = state;
+            // 计算旋转矩阵
+            Eigen::Matrix3d R_rotated = rotation.toRotationMatrix() * Eigen::Matrix3d::Identity();
+            //Eigen::Quaterniond Q = Eigen::AngleAxisd(curr_gps_data.rpy.z(), Eigen::Vector3d::UnitZ()) * Eigen::AngleAxisd(0 * kDeg2Rad, Eigen::Vector3d::UnitY()) * Eigen::AngleAxisd(0 * kDeg2Rad, Eigen::Vector3d::UnitX());
+            //前右地 rtk北东地
+            //Eigen::Quaterniond Q = Eigen::AngleAxisd(90 * kDeg2Rad, Eigen::Vector3d::UnitZ()) * Eigen::AngleAxisd(0 * kDeg2Rad, Eigen::Vector3d::UnitY()) * Eigen::AngleAxisd(180 * kDeg2Rad, Eigen::Vector3d::UnitX());
+            //init_pose_.block<3, 3>(0, 0) = E3dEulerToMatrix(curr_gps_data.rpy);
+            init_pose_.block<3, 1>(0, 3) = curr_gps_data.xyz;
+            init_pose_.block<3, 3>(0, 0) = R_rotated;
+            std::cout << "orin:" << init_pose_.block<3, 3>(0, 0) << std::endl;
+            state_.G_p_I = init_pose_.block<3, 1>(0, 3);
+            state_.G_R_I = init_pose_.block<3, 3>(0, 0);
+            X_.block<3, 1>(INDEX_STATE_ORI, 0) = (state_.G_R_I * (E3dEulerToMatrix(curr_imu_data.rpy).inverse())).eulerAngles(0, 1, 2);
+            imu_data_buff_.clear(); // 这时ESKF中的imu数据
+            imu_data_buff_.push_back(curr_imu_data);
 
-            // Acc and gyro.
-            const Eigen::Vector3d acc_unbias = 0.5 * (last_odom_.acc + cur_input.acc) - last_state.acc_bias;
-            const Eigen::Vector3d gyro_unbias = 0.5 * (last_odom_.gyro + cur_input.gyro) - last_state.gyro_bias;
-
-            // Normal state.
-            // Using P58. of "Quaternion kinematics for the error-state Kalman Filter".
-            if (1)
-                state.G_p_I = last_state.G_p_I + last_state.G_v_I * delta_t + 0.5 * (last_state.G_R_I * acc_unbias + gravity_) * delta_t2;
-            else
-                state.G_p_I = last_state.G_p_I + (cur_input.position - last_odom_.position);
-            if (0)
-                state.G_v_I = last_state.G_v_I + (last_state.G_R_I * acc_unbias + gravity_) * delta_t;
-            else
-                state.G_v_I = ((last_state.G_v_I + (last_state.G_R_I * acc_unbias + gravity_) * delta_t) + cur_input.twist) / 2.0; //速度为轮速与imu积分和
-            Eigen::Vector3d delta_angle_axis;
-            if (0)
-                delta_angle_axis = gyro_unbias * delta_t;
-            else
-                delta_angle_axis = cur_input.rpy - last_odom_.rpy;
-            if (delta_angle_axis.norm() > 1e-12) {
-                state.G_R_I = last_state.G_R_I * Eigen::AngleAxisd(delta_angle_axis.norm(), delta_angle_axis.normalized()).toRotationMatrix();
-            }
-            Eigen::Matrix<double, 15, 15> Fx = Eigen::Matrix<double, 15, 15>::Identity();
-            Fx.block<3, 3>(0, 3) = Eigen::Matrix3d::Identity() * delta_t;
-            Fx.block<3, 3>(3, 6) = -state.G_R_I * GetSkewMatrix(acc_unbias) * delta_t;
-            Fx.block<3, 3>(3, 9) = -state.G_R_I * delta_t;
-            if (delta_angle_axis.norm() > 1e-12) {
-                Fx.block<3, 3>(6, 6) = Eigen::AngleAxisd(delta_angle_axis.norm(), delta_angle_axis.normalized()).toRotationMatrix().transpose();
-            } else {
-                Fx.block<3, 3>(6, 6).setIdentity();
-            }
-            Fx.block<3, 3>(6, 12) = -Eigen::Matrix3d::Identity() * delta_t;
-
-            Eigen::Matrix<double, 15, 12> Fi = Eigen::Matrix<double, 15, 12>::Zero();
-            Fi.block<12, 12>(3, 0) = Eigen::Matrix<double, 12, 12>::Identity();
-
-            Eigen::Matrix<double, 12, 12> Qi = Eigen::Matrix<double, 12, 12>::Zero();
-            Qi.block<3, 3>(0, 0) = delta_t2 * acc_noise_ * Eigen::Matrix3d::Identity();
-            Qi.block<3, 3>(3, 3) = delta_t2 * gyro_noise_ * Eigen::Matrix3d::Identity();
-            Qi.block<3, 3>(6, 6) = delta_t * acc_bias_noise_ * Eigen::Matrix3d::Identity();
-            Qi.block<3, 3>(9, 9) = delta_t * gyro_bias_noise_ * Eigen::Matrix3d::Identity();
-
-            state.cov = Fx * last_state.cov * Fx.transpose() + Fi * Qi * Fi.transpose();
-
-            // Time and imu.
-            state.timestamp = cur_input.time;
+            curr_gps_data_ = curr_gps_data;
+            init_ = true;
         }
-        last_odom_ = cur_input;
+        return init_;
+    };
+    bool GetInitState() {
+        if (init_)
+            return true;
+        else
+            return false;
     }
-    void UpdateStateByGpsPosition(const GnssData gps_data_ptr) {
-        Eigen::Matrix<double, 3, 15> H;
-        Eigen::Vector3d residual;
-        double residual_yaw;
-        Eigen::Vector3d G_p_Gps = gps_data_ptr.xyz;
-        // Compute residual.
-        residual = G_p_Gps - (state.G_p_I + state.G_R_I * I_p_Gps_);
-        if (abs(gps_data_ptr.rpy(2)) < 2 * M_PI)
-            residual_yaw = gps_data_ptr.rpy(2) - state.G_R_I.eulerAngles(0, 1, 2).z();
-        // Compute jacobian.
-        Eigen::Matrix3d input_angul;
-        if (abs(gps_data_ptr.rpy(2)) < 2 * M_PI && 0) {
-            input_angul = -E3dEulerToMatrix(gps_data_ptr.rpy);
+
+    bool UpdateErrorState(double t, const Eigen::Vector3d &accel) {
+        Eigen::Matrix3d F_23 = GetSkewMatrix(accel);
+        // 没有更新F33,因为它是常数，由地球自转和纬度决定
+        F_.block<3, 3>(INDEX_STATE_VEL, INDEX_STATE_ORI) = F_23;
+        F_.block<3, 3>(INDEX_STATE_VEL, INDEX_STATE_ACC_BIAS) = state_.G_R_I;
+        F_.block<3, 3>(INDEX_STATE_ORI, INDEX_STATE_GYRO_BIAS) = -state_.G_R_I;
+        B_.setZero();
+        B_.block<3, 3>(INDEX_STATE_VEL, 3) = state_.G_R_I;
+        B_.block<3, 3>(INDEX_STATE_ORI, 0) = -state_.G_R_I;
+
+        TypeMatrixF Fk = TypeMatrixF::Identity() + F_ * t;
+        TypeMatrixB Bk = B_ * t;
+
+        Ft_ = F_ * t;
+
+        X_ = Fk * X_ + Bk * W_;
+        P_ = Fk * P_ * Fk.transpose() + Bk * Q_ * Bk.transpose();
+
+        return true;
+    }
+    /*!
+     * 滤波器的预测，对应卡尔曼滤波器的前两个公式
+     * @param curr_imu_data
+     * @return
+     */
+    bool Predict(const OdometryData &curr_imu_data) {
+        imu_data_buff_.push_back(curr_imu_data);
+        //std::cout << "imu.acc:" << curr_imu_data.acc.transpose() << "gyro:" << curr_imu_data.gyro.transpose() << std::endl;
+        if (1) {
+            UpdateOdomEstimation(); // 更新 角度  速度 位置  PVQ
+
+            double delta_t = curr_imu_data.time - imu_data_buff_.front().time; // dt
+
+            Eigen::Vector3d curr_accel = state_.G_R_I * curr_imu_data.acc; // 导航坐标系下的加速度
+
+            UpdateErrorState(delta_t, curr_accel); // 更新误差状态，只与R和accel相关
+        }
+        imu_data_buff_.pop_front();
+        return true;
+    };
+
+    /*!
+     * 滤波器的矫正，对应卡尔曼滤波器的后三个公式
+     * @param curr_gps_data
+     * @return
+     */
+    bool Correct(const GnssData &curr_gps_data) {
+        curr_gps_data_ = curr_gps_data;
+
+        Y_ = state_.G_p_I - curr_gps_data.xyz; //! Y_cal-Y_measure
+
+        K_ = P_ * H_.transpose() * (H_ * P_ * H_.transpose() + C_ * R_ * C_.transpose()).inverse(); // kalman增益
+
+        P_ = (TypeMatrixP::Identity() - K_ * H_) * P_;
+        X_ = X_ + K_ * (Y_ - H_ * X_);
+
+        EliminateError();
+
+        ResetState();
+
+        return true;
+    }
+
+    State GetPose() const {
+        State out_pos;
+        out_pos.G_p_I = state_.G_p_I;
+        out_pos.G_R_I = imu_t_wheel_.block<3, 3>(0, 0).inverse() * state_.G_R_I;
+        return out_pos;
+    }
+
+    Eigen::Vector3d GetVelocity() {
+        return state_.G_v_I;
+    }
+
+private:
+    void SetCovarianceW(double gyro_noise, double accel_noise) {
+        W_.setZero();
+        W_.block<3, 1>(0, 0) = Eigen::Vector3d(accel_noise, accel_noise, accel_noise);
+        W_.block<3, 1>(3, 0) = Eigen::Vector3d(gyro_noise, gyro_noise, gyro_noise);
+    }
+
+    void SetCovarianceQ(double gyro_noise, double accel_noise) {
+        Q_.setZero();
+        Q_.block<3, 3>(0, 0) = Eigen::Matrix3d::Identity() * gyro_noise * gyro_noise; // 平方
+        Q_.block<3, 3>(3, 3) = Eigen::Matrix3d::Identity() * accel_noise * accel_noise;
+    }
+
+    void SetCovarianceR(double posi_noise) {
+        R_.setZero();
+        R_ = Eigen::Matrix3d::Identity() * posi_noise * posi_noise;
+    }
+
+    // 设置P矩阵
+    void SetCovarianceP(double posi_noise, double velo_noise, double ori_noise,
+                        double gyro_noise, double accel_noise) {
+        P_.setZero();
+        P_.block<3, 3>(INDEX_STATE_POSI, INDEX_STATE_POSI) = Eigen::Matrix3d::Identity() * posi_noise;
+        P_.block<3, 3>(INDEX_STATE_VEL, INDEX_STATE_VEL) = Eigen::Matrix3d::Identity() * velo_noise;
+        P_.block<3, 3>(INDEX_STATE_ORI, INDEX_STATE_ORI) = Eigen::Matrix3d::Identity() * ori_noise;
+        P_.block<3, 3>(INDEX_STATE_GYRO_BIAS, INDEX_STATE_GYRO_BIAS) = Eigen::Matrix3d::Identity() * gyro_noise;
+        P_.block<3, 3>(INDEX_STATE_ACC_BIAS, INDEX_STATE_ACC_BIAS) = Eigen::Matrix3d::Identity() * accel_noise;
+    }
+
+    /*!
+     * 通过IMU计算位姿和速度
+     * @return
+     */
+    bool UpdateOdomEstimation() {
+        Eigen::Vector3d angular_delta;
+        ComputeAngularDelta(angular_delta); // 平均角速度求转动过的角度，以此求delta_R
+
+        Eigen::Matrix3d R_nm_nm_1 = Eigen::Matrix3d::Identity(); // i系到n系
+        if (0)                                                   //不考虑地球自传
+            ComputeEarthTranform(R_nm_nm_1);                     // 考虑地球自传
+
+        Eigen::Matrix3d curr_R, last_R;
+        ComputeOrientation(angular_delta, R_nm_nm_1, curr_R, last_R);
+
+        Eigen::Vector3d curr_vel, last_vel;
+        ComputeVelocity(curr_vel, last_vel, curr_R, last_R);
+
+        ComputePosition(curr_vel, last_vel);
+
+        return true;
+    }
+
+    bool ComputeAngularDelta(Eigen::Vector3d &angular_delta) {
+        OdometryData curr_imu_data = imu_data_buff_.at(1);
+        OdometryData last_imu_data = imu_data_buff_.at(0);
+
+        double delta_t = curr_imu_data.time - last_imu_data.time;
+
+        if (delta_t <= 0) {
+            return false;
+        }
+        if (1) {
+            Eigen::Vector3d curr_angular_vel = curr_imu_data.gyro;
+            Eigen::Vector3d last_angular_vel = last_imu_data.gyro;
+            // 直接使用last_R来对gyro_bias进行旋转
+            Eigen::Matrix3d last_R = state_.G_R_I;
+            Eigen::Vector3d curr_unbias_angular_vel = curr_angular_vel;
+            Eigen::Vector3d last_unbias_angular_vel = last_angular_vel;
+            angular_delta = 0.5 * (curr_unbias_angular_vel + last_unbias_angular_vel) * delta_t; // 中值
         } else {
-            input_angul = -state.G_R_I * GetSkewMatrix(I_p_Gps_);
+            angular_delta = curr_imu_data.rpy - last_imu_data.rpy;
         }
-        H.setZero();
-        H.block<3, 3>(0, 0) = Eigen::Matrix3d::Identity();
-        H.block<3, 3>(0, 6) = input_angul;
-        Eigen::Matrix3d V = gps_data_ptr.cov; //观测噪声
-        V << 0.002, 0.0, 0.0,
-            0.0, 0.002, 0.0,
-            0.0, 0.0, 0.002;
-        // EKF.
-        const Eigen::MatrixXd &P = state.cov;
-        const Eigen::MatrixXd K = P * H.transpose() * (H * P * H.transpose() + V).inverse();
-        const Eigen::VectorXd delta_x = K * residual;
-        // Add delta_x to state.
-        state.G_p_I += delta_x.block<3, 1>(0, 0);
-        state.G_v_I += delta_x.block<3, 1>(3, 0);
-        state.acc_bias += delta_x.block<3, 1>(9, 0);
-        state.gyro_bias += delta_x.block<3, 1>(12, 0);
-        if (delta_x.block<3, 1>(6, 0).norm() > 1e-12) {
-            state.G_R_I *= Eigen::AngleAxisd(delta_x.block<3, 1>(6, 0).norm(), delta_x.block<3, 1>(6, 0).normalized()).toRotationMatrix();
+
+        return true;
+    }
+
+    /*!
+     * 计算地球转动给导航系带来的变换
+     * @param R_nm_nm_1
+     * @return
+     */
+    bool ComputeEarthTranform(Eigen::Matrix3d &R_nm_nm_1) {
+        OdometryData curr_imu_data = imu_data_buff_.at(1);
+        OdometryData last_imu_data = imu_data_buff_.at(0);
+
+        double delta_t = curr_imu_data.time - last_imu_data.time;
+
+        constexpr double rm = 6353346.18315;
+        constexpr double rn = 6384140.52699;
+        Eigen::Vector3d w_en_n(-state_.G_v_I[1] / (rm + curr_gps_data_.LonLatAlt[2]),
+                               state_.G_v_I[0] / (rn + curr_gps_data_.LonLatAlt[2]),
+                               state_.G_v_I[0] / (rn + curr_gps_data_.LonLatAlt[2])
+                                   * std::tan(curr_gps_data_.LonLatAlt[0] * kDeg2Rad));
+        // 实际导航坐标系中，不动系(i系)是地心惯性系，我们需要的导航结果是相对于导航系(n系)的
+        // 两个坐标系中有一个相对旋转，旋转角速度为w_in_n 。
+        Eigen::Vector3d w_in_n = w_en_n + w_; // 导航系(n系)相对于惯性系(i系)的旋转，包含导航系相对于地球的旋转和地球自转
+        auto angular = delta_t * w_in_n;
+        Eigen::AngleAxisd angle_axisd(angular.norm(), angular.normalized());
+        R_nm_nm_1 = angle_axisd.toRotationMatrix().transpose(); // 取转置，得到i系相对于n系的转换
+        return true;
+    }
+
+    bool ComputeOrientation(const Eigen::Vector3d &angular_delta,
+                            const Eigen::Matrix3d R_nm_nm_1,
+                            Eigen::Matrix3d &curr_R,
+                            Eigen::Matrix3d &last_R) {
+        Eigen::AngleAxisd angle_axisd(angular_delta.norm(), angular_delta.normalized()); // 轴角公式，前一个为转动角度，后一个为向量。角度转旋转矩阵
+        last_R = state_.G_R_I;
+
+        curr_R = R_nm_nm_1 * state_.G_R_I * angle_axisd.toRotationMatrix(); // R*delta_R
+
+        state_.G_R_I = curr_R;
+
+        return true;
+    }
+
+    // 使用去除重力影响和加速度bias的平均加速度计算速度
+    bool ComputeVelocity(Eigen::Vector3d &curr_vel, Eigen::Vector3d &last_vel,
+                         const Eigen::Matrix3d &curr_R,
+                         const Eigen::Matrix3d last_R) {
+        OdometryData curr_imu_data = imu_data_buff_.at(1);
+        OdometryData last_imu_data = imu_data_buff_.at(0);
+        double delta_t = curr_imu_data.time - last_imu_data.time;
+        if (delta_t <= 0) {
+            return false;
         }
-        // Covarance.
-        const Eigen::MatrixXd I_KH = Eigen::Matrix<double, 15, 15>::Identity() - K * H;
-        state.cov = I_KH * P * I_KH.transpose() + K * V * K.transpose();
-        last_odom_.position = state.G_p_I;
+
+        Eigen::Vector3d curr_accel = curr_imu_data.acc;
+        Eigen::Vector3d curr_unbias_accel = GetUnbiasAccel(curr_R * curr_accel);
+        //std::cout << "curr_acc:" << curr_accel.transpose() << " curr_unbias_acc:" << curr_unbias_accel.transpose() << "  R:" << curr_R.eulerAngles(0, 1, 2).transpose() << std::endl;
+        Eigen::Vector3d last_accel = last_imu_data.acc;
+        Eigen::Vector3d last_unbias_accel = GetUnbiasAccel(last_R * last_accel); // 减去重力影响
+        //std::cout << "last_acc:" << last_accel.transpose() << " last_unbias_acc:" << last_accel.transpose() << "  last_R:" << last_R.eulerAngles(0, 1, 2).transpose() << std::endl;
+        last_vel = state_.G_v_I;
+        state_.G_v_I += delta_t * 0.5 * (curr_unbias_accel + last_unbias_accel);
+        if (1) //重新写速度观测
+            state_.G_v_I = curr_R * curr_imu_data.twist;
+        curr_vel = state_.G_v_I;
+        //std::cout << "imu vel:" << curr_vel.transpose() << "imu input vel:" << (curr_R * curr_imu_data.twist).transpose() << std::endl;
+        return true;
+    }
+
+    Eigen::Vector3d GetUnbiasAccel(const Eigen::Vector3d &accel) {
+        return accel - state_.acc_bias + g_; // z方向精度提高很多
+                                             // return accel + g_;
+    }
+
+    bool ComputePosition(const Eigen::Vector3d &curr_vel, const Eigen::Vector3d &last_vel) {
+        double delta_t = imu_data_buff_.at(1).time - imu_data_buff_.at(0).time;
+        state_.G_p_I += 0.5 * delta_t * (curr_vel + last_vel);
+
+        return true;
+    }
+    // 只将状态量置零
+    void ResetState() {
+        X_.setZero();
+    }
+    // 估计值=估计值-误差量
+    void EliminateError() {
+        state_.G_p_I = state_.G_p_I - X_.block<3, 1>(INDEX_STATE_POSI, 0);
+        state_.G_v_I = state_.G_v_I - X_.block<3, 1>(INDEX_STATE_VEL, 0);
+        Eigen::Matrix3d C_nn = expSO3(X_.block<3, 1>(INDEX_STATE_ORI, 0)).matrix();
+        state_.G_R_I = C_nn * state_.G_R_I; // 固定坐标系更新，左乘
+        if (0) {
+            state_.gyro_bias = state_.gyro_bias - X_.block<3, 1>(INDEX_STATE_GYRO_BIAS, 0);
+            state_.acc_bias = state_.acc_bias - X_.block<3, 1>(INDEX_STATE_ACC_BIAS, 0);
+        } else {
+            state_.acc_bias = Eigen::Vector3d::Zero();  //估计存在错误,设置为0
+            state_.gyro_bias = Eigen::Vector3d::Zero(); //估计存在错误,设置为0
+        }
     }
 };

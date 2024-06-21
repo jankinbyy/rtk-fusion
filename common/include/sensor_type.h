@@ -242,6 +242,7 @@ public:
         this->rpy = b.rpy;
         this->status = b.status;
         this->service = b.service;
+        this->cov = b.cov;
         return *this;
     }
     GnssData(double _t, double _lon, double _lat, double _alt, int _stat, int _ser) :
@@ -256,6 +257,14 @@ public:
         service(_ser) {
         xyz << _x, _y, _z;
         LonLatAlt << _lon, _lat, _alt;
+    }
+    GnssData(double _t, double _lon, double _lat, double _alt, double _x, double _y, double _z, Eigen::Matrix3d _cov, int _stat, int _ser) :
+        timestamp(_t),
+        status(_stat),
+        service(_ser) {
+        xyz << _x, _y, _z;
+        LonLatAlt << _lon, _lat, _alt;
+        cov = _cov;
     }
 };
 using GnssDataPtr = std::shared_ptr<GnssData>;
@@ -311,28 +320,23 @@ public:
     }
 };
 using OdometryDataPtr = std::shared_ptr<OdometryData>;
-
 struct State {
-    double timestamp;
-
-    Eigen::Vector3d lla; // WGS84 position.
-    Eigen::Vector3d
-        G_p_I;             // The original point of the IMU frame in the Global frame.
-    Eigen::Vector3d G_v_I; // The velocity original point of the IMU frame in the
-                           // Global frame.
-    Eigen::Matrix3d
-        G_R_I;                 // The rotation from the IMU frame to the Global frame.
-    Eigen::Vector3d acc_bias;  // The bias of the acceleration sensor.
-    Eigen::Vector3d gyro_bias; // The bias of the gyroscope sensor.
-    // Covariance.
-    Eigen::Matrix<double, 15, 15> cov;
+    Eigen::Vector3d G_p_I = Eigen::Vector3d::Zero();     // The original point of the IMU frame in the Global frame.
+    Eigen::Vector3d G_v_I = Eigen::Vector3d::Zero();     // The velocity original point of the IMU frame in t
+    Eigen::Matrix3d G_R_I = Eigen::Matrix3d::Identity(); // The rotation from the IMU frame to the Global frame.
+    Eigen::Vector3d acc_bias = Eigen::Vector3d::Zero();  // The bias of the acceleration sensor.
+    Eigen::Vector3d gyro_bias = Eigen::Vector3d::Zero(); // The bias of the gyroscope sensor.
 };
 
 struct Gnss_With_DrOdom {
     int status = -1; // 0:not align to odom axis  1:angle not filter 2:angle filtered
     double time;
-    GnssData gnss_data;
-    OdometryData ref_drOdom;
+    GnssData gnss_pose_;
+    OdometryData dr_pose_;
+    void SetData(GnssData _gnss_pose, OdometryData _dr_pose) {
+        gnss_pose_ = _gnss_pose;
+        dr_pose_ = _dr_pose;
+    };
     Gnss_With_DrOdom() {
         time = 0.;
     }

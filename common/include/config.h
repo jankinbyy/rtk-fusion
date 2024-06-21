@@ -24,6 +24,7 @@ public:
     static string rtk_topic_;
     static Eigen::Matrix4d imu_T_wheel_;
     static double wheel_sx_;
+    static string log_;
 
     static YAML::Node config_node_;
 };

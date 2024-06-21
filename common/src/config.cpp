@@ -6,9 +6,12 @@ string Config::wheel_topic_;
 string Config::rtk_topic_;
 Eigen::Matrix4d Config::imu_T_wheel_;
 double Config::wheel_sx_;
+string Config::log_;
 
 void Config::readConfig(std::string path) {
     config_node_ = YAML::LoadFile(path);
+    YAML::Node comon_config_node_ = config_node_["common"];
+    log_ = comon_config_node_["log_save_path"].as<string>();
     YAML::Node topic_config_node_ = config_node_["topic"];
     imu_topic_ = topic_config_node_["imu_topic"].as<string>();
     std::cout << "imu topic:" << imu_topic_ << std::endl;

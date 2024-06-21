@@ -7,7 +7,6 @@ Panels:
         - /Global Options1
         - /Status1
         - /Grid1
-        - /Odometry1
         - /Odometry1/Shape1
       Splitter Ratio: 0.5
     Tree Height: 515
@@ -208,7 +207,7 @@ Visualization Manager:
         Shaft Length: 1
         Shaft Radius: 0.05000000074505806
         Value: Arrow
-      Topic: /odom
+      Topic: /dr2_odom/odom
       Unreliable: false
       Value: true
     - Alpha: 2
@@ -271,11 +270,11 @@ Visualization Manager:
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Scale: 6.873073577880859
+      Scale: 13.17833423614502
       Target Frame: <Fixed Frame>
       Value: TopDownOrtho (rviz)
-      X: -3.720839023590088
-      Y: 25.298519134521484
+      X: 23.81012725830078
+      Y: 0.3340020179748535
     Saved: ~
 Window Geometry:
   Displays:

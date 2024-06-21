@@ -12,8 +12,8 @@
 #include "eigen3/Eigen/Dense"
 #include <limits>
 #include "log.hpp"
-constexpr double kDeg2Rad = M_PI / 180.;
-constexpr double kRad2Deg = 180. / M_PI;
+constexpr double kDeg2Rad = M_PI / 180.; //度转弧度
+constexpr double kRad2Deg = 180. / M_PI; //弧度转度
 constexpr double kGravity = 9.8;
 const double POSITIVE_INFINITY = std::numeric_limits<double>::infinity();
 enum class Status { kValid,
@@ -258,4 +258,19 @@ static Eigen::Matrix3d QuatToRotMax(Eigen::Quaterniond q) {
     Eigen::Matrix3d rotation_matrix;
     rotation_matrix = q.toRotationMatrix();
     return rotation_matrix;
+}
+
+static Eigen::Matrix3d expSO3(const Eigen::Vector3d &omega) {
+    double theta = omega.norm();
+    Eigen::Matrix3d Omega = GetSkewMatrix(omega);
+
+    Eigen::Matrix3d I = Eigen::Matrix3d::Identity();
+
+    if (theta < 1e-10) {
+        // When theta is very small, use first-order Taylor expansion
+        return I + Omega;
+    } else {
+        Eigen::Matrix3d Omega2 = Omega * Omega;
+        return I + (std::sin(theta) / theta) * Omega + ((1 - std::cos(theta)) / (theta * theta)) * Omega2;
+    }
 }

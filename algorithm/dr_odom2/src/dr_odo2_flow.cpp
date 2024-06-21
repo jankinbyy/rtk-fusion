@@ -22,6 +22,7 @@ using namespace std;
 DrOdoFlow2::DrOdoFlow2(Eigen::Matrix4d IMU_T_WHEEL) :
     mTwi(Eigen::Matrix4d::Identity()) {
     mTvi = IMU_T_WHEEL;
+    imu_t_wheel = IMU_T_WHEEL;
 }
 
 void DrOdoFlow2::Optimization() {
@@ -69,6 +70,14 @@ void DrOdoFlow2::setRvi(const Eigen::Matrix<double, 3, 3> &Rvi) {
     mbGetRviExt = true;
 }
 
+void DrOdoFlow2::WheelVel2IMUVel(Eigen::Vector3d &vel_data, const Eigen::Vector3d &ang_vel) { // ang_vel measured by IMU, and is expressed in IMU coordinate
+    // If all expressed in IMU coordinate, v_IMU = v_Wheel + ang_vel × r_Wheel_IMU
+    Eigen::Matrix3d R_IMU_Wheel = imu_t_wheel.block<3, 3>(0, 0);
+    Eigen::Vector3d r_Wheel_IMU = R_IMU_Wheel * imu_t_wheel.inverse().block<3, 1>(0, 3); // expressed in IMU coordinate ￥imu_to_wheel_
+    Eigen::Vector3d v_Wheel = vel_data;                                                  // expressed in Wheel coordinate
+    Eigen::Vector3d v_IMU = R_IMU_Wheel * v_Wheel + ang_vel.cross(r_Wheel_IMU);
+    vel_data = v_IMU;
+}
 Eigen::Matrix3d DrOdoFlow2::eulerAnglesToRotationMatrix(
     Eigen::Vector3d &theta) {
     Eigen::Matrix3d R_x; // 计算旋转矩阵的X分量
@@ -177,6 +186,7 @@ void DrOdoFlow2::processWheel() {
     double imu_back_time = 0.0;
     double time_s = 0.0, vel_linear = 0.0, vel_angular = 0.0;
     sensor_msgs_z::IMUData imu_result;
+    Eigen::Vector3d angule_imu = {0.0, 0.0, 0.0};
     while (!mqWheelBuffer.empty() && !mqIMUBuffer.empty()) {
         {
             std::unique_lock<std::mutex> lock_wheel(mWheelDataMutex);
@@ -201,6 +211,7 @@ void DrOdoFlow2::processWheel() {
                 std::unique_lock<std::mutex> lock_imu(mImuDataMutex);
                 while ((!mqIMUBuffer.empty()) && (mqIMUBuffer.front().first < time_s + 0.001)) {
                     Eigen::Matrix<double, 6, 1> data_imu = mqIMUBuffer.front().second;
+                    angule_imu << data_imu(3), data_imu(4), data_imu(5);
                     double data_time = mqIMUBuffer.front().first;
                     lock_imu.unlock();
                     imu_result = processImu(data_time, data_imu, bStatic);
@@ -218,23 +229,19 @@ void DrOdoFlow2::processWheel() {
                     mqIMUBuffer.pop_front();
                 }
             }
-            double dDist = (time_s - mLastWheelTime) * vel_linear;
             if (imu_result.efficient) {
-                mXOdom += cos(imu_result.rpy(2)) * dDist;
-                mYOdom += sin(imu_result.rpy(2)) * dDist;
+                Eigen::Vector3d inspeed = {vel_linear, 0.0, 0.0};
+                WheelVel2IMUVel(inspeed, angule_imu);
+                Eigen::Vector3d dDist = inspeed * (time_s - mLastWheelTime);
+                Eigen::Matrix3d MatRPY = E3dEulerToMatrix(imu_result.rpy);
+                {
+                    std::unique_lock<std::shared_timed_mutex> lock(get_pose_mutex_);
+                    Odom_.position += MatRPY * dDist;
+                    Odom_.twist = inspeed;
+                }
                 mLastWheelTime = time_s;
-                Twv_p(0, 3) = mXOdom;
-                Twv_p(1, 3) = mYOdom;
-                Eigen::Vector3d rpy_res = imu_result.rpy;
-                Twv_p.block<3, 3>(0, 0) = eulerAnglesToRotationMatrix(rpy_res);
-                mTwi = Twv_p * mTvi;
             }
             mPublishPoseFlag = true;
-            {
-                std::unique_lock<std::shared_timed_mutex> lock(get_pose_mutex_);
-                Odom_.position << mXOdom, mYOdom, 0.0;
-                Odom_.twist << vel_linear, 0.0, 0.0;
-            }
             if (time_s > 0)
                 fTestWheelOdom << std::fixed << std::setprecision(3) << time_s << " "
                                << mXOdom << " " << mYOdom << " 0 " << imu_result.rpy(0) << " "

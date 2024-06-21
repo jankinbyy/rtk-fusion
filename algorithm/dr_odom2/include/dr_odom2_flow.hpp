@@ -68,7 +68,7 @@ private:
                                       bool bStatic);
 
     void processWheel();
-
+    void WheelVel2IMUVel(Eigen::Vector3d &vel_data, const Eigen::Vector3d &ang_vel);
     void CalcStaticBias(const Eigen::Vector3d &gry);
 
     Eigen::Vector3d updateIMU(double gx, double gy, double gz, double ax,
@@ -106,6 +106,7 @@ private:
     double mXOdom = 0.;
     double mYOdom = 0.;
     Eigen::Matrix4d mTvi = Eigen::Matrix4d::Identity();
+    Eigen::Matrix4d imu_t_wheel;
 
 public:
     double mLastWheelTime = 0.;

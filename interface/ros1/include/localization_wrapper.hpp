@@ -24,7 +24,7 @@
 #include "config.h"
 #include "GeocentricENU.hpp"
 #include <nav_msgs/Odometry.h>
-#define DR_ODOM1 false
+#define DR_ODOM1 true
 class LocalizationWrapper {
 public:
     LocalizationWrapper(ros::NodeHandle &nh);
