@@ -10,8 +10,16 @@ LocalizationWrapper::LocalizationWrapper(ros::NodeHandle &nh) {
     std::string log_folder = "../log";
     Config::readConfig(config_file);
     // Log.
-    file_state_.open(log_folder + "/state.csv");
-    file_gps_.open(log_folder + "/gps.csv");
+    file_fusion_pos_.open(log_folder + "/fusion_pose.csv", std::ios::out);
+    file_fusion_pos_.close();
+    file_fusion_pos_.open(log_folder + "/fusion_pose.csv", std::ios::app);
+    file_fusion_pos_.setf(std::ios::fixed, std::ios::floatfield);
+    file_fusion_pos_.precision(9);
+    file_gps_.open(log_folder + "/gps.csv", std::ios::out);
+    file_gps_.close();
+    file_gps_.open(log_folder + "/gps.csv", std::ios::app);
+    file_gps_.setf(std::ios::fixed, std::ios::floatfield);
+    file_gps_.precision(9);
     ros_wrapper_log_.Init("ros_wrapper", 3, "../log/ros_wrapp.log");
     // Initialization imu gps localizer.
     Eigen::Matrix4d imu_t_wheel = Config::imu_T_wheel_;
@@ -35,9 +43,22 @@ LocalizationWrapper::LocalizationWrapper(ros::NodeHandle &nh) {
     odom_pub_ = nh.advertise<nav_msgs::Odometry>("/dr2_odom/odom", 50);
     run_thread_ = std::thread(&LocalizationWrapper::Evaluate, this);
     run_thread_rtk_ = std::thread(&LocalizationWrapper::EvaluateRTK, this);
+    run_thread_fun_ = std::thread(&LocalizationWrapper::Function_Ctl_, this);
+}
+void LocalizationWrapper::Function_Ctl_() {
+    while (ros::ok()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    filterangle_odom_rtk_ptr_->Stop();
+    start_alg_ = false;
+    ros::shutdown();
+    std::cout << "ros ok end!" << std::endl;
+    run_thread_.join();
+    run_thread_rtk_.join();
+    run_thread_fun_.join();
 }
 void LocalizationWrapper::Evaluate() {
-    while (start_alg_) {
+    while (start_alg_ && ros::ok()) {
         {
             std::unique_lock<std::shared_timed_mutex> lock(m_data_mutex_);
             data_condition_.wait(
@@ -47,9 +68,10 @@ void LocalizationWrapper::Evaluate() {
                 imu_buf_.pop_front();
                 // Unlock mutex during the processing to allow other threads to push data.
                 lock.unlock();
-                imu_wheel_localizer_ptr_->setImu(
-                    imu_msg.timestamp, imu_msg.acc(0), imu_msg.acc(1), imu_msg.acc(2),
-                    imu_msg.gyro(0), imu_msg.gyro(1), imu_msg.gyro(2));
+                if (DR_ODOM2)
+                    imu_wheel_localizer_ptr_->setImu(
+                        imu_msg.timestamp, imu_msg.acc(0), imu_msg.acc(1), imu_msg.acc(2),
+                        imu_msg.gyro(0), imu_msg.gyro(1), imu_msg.gyro(2));
                 if (DR_ODOM1)
                     imu_wheel_loc_ptr_->setImu(
                         imu_msg.timestamp, imu_msg.acc(0), imu_msg.acc(1), imu_msg.acc(2),
@@ -63,37 +85,39 @@ void LocalizationWrapper::Evaluate() {
                 wheelOdom_buf_.pop_front();
                 // Similar unlock, process, and re-lock pattern.
                 lock.unlock();
-                imu_wheel_localizer_ptr_->setWheel(odom_msg.timestamp, odom_msg.vel(0),
-                                                   odom_msg.gyro(2));
+                if (DR_ODOM2)
+                    imu_wheel_localizer_ptr_->setWheel(odom_msg.timestamp, odom_msg.vel(0),
+                                                       odom_msg.gyro(2));
                 if (DR_ODOM1)
                     imu_wheel_loc_ptr_->setWheel(odom_msg.timestamp, odom_msg.vel(0),
                                                  odom_msg.gyro(2));
                 lock.lock();
             }
         }
-        imu_wheel_localizer_ptr_->Optimization();
-        if (DR_ODOM1)
-            imu_wheel_loc_ptr_->Optimization();
         OdometryData pose_out;
-        imu_wheel_localizer_ptr_->getPose(pose_out);
-        ConvertStateToRosTopic(pose_out, dr2_path_);
-        odom2_pub_.publish(dr2_path_);
+        if (DR_ODOM2) {
+            imu_wheel_localizer_ptr_->Optimization();
+            imu_wheel_localizer_ptr_->getPose(pose_out);
+            ConvertStateToRosTopic(pose_out, dr2_path_);
+            odom2_pub_.publish(dr2_path_);
+        }
         if (DR_ODOM1) {
+            imu_wheel_loc_ptr_->Optimization();
             OdometryData pose_out_dr1;
             imu_wheel_loc_ptr_->getPose(pose_out_dr1);
             ConvertStateToRosTopic(pose_out_dr1, dr1_path_);
             odom1_pub_.publish(dr1_path_);
         }
-
         {
             std::unique_lock<std::shared_timed_mutex> lock_rtk(rtk_dr_mutex_);
             dr_buf_.push_back(pose_out);
         }
         rtk_dr_condition_.notify_one();
     }
+    std::cout << "Evaluate Dr over" << std::endl;
 }
 void LocalizationWrapper::EvaluateRTK() {
-    while (start_alg_) {
+    while (start_alg_ && ros::ok()) {
         std::unique_lock<std::shared_timed_mutex> lock_rtk(rtk_dr_mutex_);
         rtk_dr_condition_.wait(
             lock_rtk, [this] { return !rtk_buf_.empty() || !dr_buf_.empty(); });
@@ -112,6 +136,14 @@ void LocalizationWrapper::EvaluateRTK() {
             OdometryData pub_pose =
                 filterangle_odom_rtk_ptr_->getOdometry();
             // std::cout << "fusion path:" << pub_pose.position << std::endl;
+            file_fusion_pos_ << pub_pose.time << " "
+                             << pub_pose.position.x() << " "
+                             << pub_pose.position.y() << " "
+                             << pub_pose.position.z() << " "
+                             << pub_pose.rotation.x() << " "
+                             << pub_pose.rotation.y() << " "
+                             << pub_pose.rotation.z() << " "
+                             << pub_pose.rotation.w() << std::endl;
             ConvertStateToRosTopic(pub_pose, rtk_path_);
             rtk_dr_pub_.publish(rtk_path_);
 
@@ -136,9 +168,10 @@ void LocalizationWrapper::EvaluateRTK() {
             //lock_rtk.lock();
         }
     }
+    std::cout << "Evaluate RTK over" << std::endl;
 }
 LocalizationWrapper::~LocalizationWrapper() {
-    file_state_.close();
+    file_fusion_pos_.close();
     start_alg_ = false;
     file_gps_.close();
     run_thread_.join();
@@ -168,9 +201,9 @@ void LocalizationWrapper::GpsPositionCallback(
     const sensor_msgs::NavSatFixConstPtr &gps_msg_ptr) {
     // Check the gps_status.
     int gps_status = gps_msg_ptr->status.status;
-    if (gps_msg_ptr->position_covariance[0] + gps_msg_ptr->position_covariance[4] > 0.005) { // RTK 噪声过大，认为是不可信的 fixme:是否存在中间的临界状态？
-        gps_status = 2;
-    }
+    // if (gps_msg_ptr->position_covariance[0] + gps_msg_ptr->position_covariance[4] > 0.005) { // RTK 噪声过大，认为是不可信的 fixme:是否存在中间的临界状态？
+    //     gps_status = 2;
+    // }
     if (last_reveive_rtk_time == gps_msg_ptr->header.stamp.toSec()) return;
     ros_wrapper_log_(2, "input_gps");
     Eigen::Matrix<double, 7, 1> pose_out;
@@ -179,6 +212,11 @@ void LocalizationWrapper::GpsPositionCallback(
     if (gps_status == 4) {
         ConvertStateToRosTopic(pose_out, rtk_true_path_);
         rtk_true_pub_.publish(rtk_true_path_);
+        file_gps_ << gps_msg_ptr->header.stamp.toSec() << " "
+                  << pose_out[1] << " "
+                  << pose_out[2] << " "
+                  << pose_out[3] << " "
+                  << 0.0 << " " << 0.0 << " " << 0.0 << " " << 0.0 << " " << std::endl;
     }
     Eigen::Matrix3d cov;
     cov(0, 0) = gps_msg_ptr->position_covariance[0];

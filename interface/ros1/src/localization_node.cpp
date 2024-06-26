@@ -2,22 +2,22 @@
 #include <ros/ros.h>
 #include <sensor_msgs/Imu.h>
 #include <sensor_msgs/NavSatFix.h>
-
+#include <signal.h>
 #include <memory>
 
 #include "localization_wrapper.hpp"
 
-int main(int argc, char** argv) {
-  // Set glog.
-  FLAGS_colorlogtostderr = true;
+int main(int argc, char **argv) {
+    // Set glog.
+    FLAGS_colorlogtostderr = true;
 
-  // Initialize ros.
-  ros::init(argc, argv, "imu_gps_localization");
-  ros::NodeHandle nh;
+    // Initialize ros.
+    ros::init(argc, argv, "imu_gps_localization");
+    ros::NodeHandle nh;
 
-  // Initialize localizer.
-  LocalizationWrapper localizer(nh);
-
-  ros::spin();
-  return 1;
+    // Initialize localizer.
+    LocalizationWrapper localizer(nh);
+    signal(SIGINT, [](int sig) -> void { ros::shutdown(); });
+    ros::spin();
+    return 1;
 }

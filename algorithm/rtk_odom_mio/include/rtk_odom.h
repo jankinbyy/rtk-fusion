@@ -13,7 +13,7 @@
 #include "sensor_type.h"
 #include "trans_rtk_enu.h"
 #include <utility>
-#include "eskf.hpp"
+#include "ekf_sample.hpp"
 #include "config.h"
 using namespace sensor_msgs_z;
 namespace rtk_odom_component {
@@ -22,7 +22,7 @@ class RTKOdom {
 public:
     RTKOdom(const std::string &config_file);
     ~RTKOdom();
-
+    void Stop();
     //data
     void inputGnssMsg(const GnssData &rtk_msg);
     void inputOdomMsg(const OdometryData &odom_msg);
@@ -32,7 +32,7 @@ public:
     OdometryData sync_dr_rtk(OdometryData &dr_update_pose, Gnss_With_DrOdom &align_rtk_dr_pose);
     const int RTK_BUF_SIZE = 31;
     DebugMode rtk_odom_log_;
-    std::shared_ptr<ESKF> eskf_fusion_ = nullptr;
+    EKF_S ekf_sp_;
 
 private:
     int calculate_rtk_with_odom(std::list<OdometryData> &odomData, GnssData &rtk_pos);

@@ -25,6 +25,7 @@
 #include "GeocentricENU.hpp"
 #include <nav_msgs/Odometry.h>
 #define DR_ODOM1 true
+#define DR_ODOM2 true
 class LocalizationWrapper {
 public:
     LocalizationWrapper(ros::NodeHandle &nh);
@@ -39,6 +40,7 @@ public:
                                 nav_msgs::Path &in_path);
     void ConvertStateToRosTopic(
         OdometryData pose_out, nav_msgs::Path &in_path);
+    void Function_Ctl_();
 
 private:
     ros::Subscriber imu_sub_;
@@ -51,9 +53,10 @@ private:
     ros::Publisher odom_pub_;
     std::thread run_thread_;
     std::thread run_thread_rtk_;
+    std::thread run_thread_fun_;
     std::condition_variable_any data_condition_;
     std::condition_variable_any rtk_dr_condition_;
-    std::ofstream file_state_;
+    std::ofstream file_fusion_pos_;
     std::ofstream file_gps_;
     std::shared_timed_mutex m_data_mutex_;
     std::shared_timed_mutex rtk_dr_mutex_;
