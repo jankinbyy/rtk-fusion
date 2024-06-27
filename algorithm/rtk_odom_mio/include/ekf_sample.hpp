@@ -53,8 +53,8 @@ public:
         // Measurement matrix
         Eigen::MatrixXd H3 = Eigen::MatrixXd::Identity(3, 3);
         Eigen::MatrixXd R3 = Eigen::MatrixXd::Identity(3, 3);
-        R3 << 0.03 * 0.03, 0.0, 0.0,
-            0.0, 0.03 * 0.03, 0.0,
+        R3 << 0.02 * 0.02, 0.0, 0.0,
+            0.0, 0.02 * 0.02, 0.0,
             0.0, 0.0, 2.5 * kDeg2Rad * 2.5 * kDeg2Rad;
         Eigen::VectorXd z3 = Eigen::VectorXd::Zero(3);
         z3(0) = curr_gps_data.xyz.x();
@@ -70,8 +70,8 @@ public:
         Eigen::MatrixXd S3 = H3 * P3 * H3.transpose() + R3;
         Eigen::MatrixXd K3 = P3 * H3.transpose() * S3.inverse();
         state3 += K3 * y3;
-        if ((K3 * y3).norm() > 0.5)
-            std::cout << "update big" << std::endl;
+        // if ((K3 * y3).norm() > 0.5)
+        //     std::cout << "update big" << std::endl;
         P3 = (Eigen::MatrixXd::Identity(3, 3) - K3 * H3) * P3;
     }
 

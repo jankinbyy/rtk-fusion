@@ -237,6 +237,7 @@ void DrOdoFlow2::processWheel() {
                 {
                     std::unique_lock<std::shared_timed_mutex> lock(get_pose_mutex_);
                     Odom_.position += MatRPY * dDist;
+                    Odom_.position.z() = 0.0;
                     Odom_.twist = inspeed;
                 }
                 mLastWheelTime = time_s;

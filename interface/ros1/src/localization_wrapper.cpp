@@ -43,19 +43,6 @@ LocalizationWrapper::LocalizationWrapper(ros::NodeHandle &nh) {
     odom_pub_ = nh.advertise<nav_msgs::Odometry>("/dr2_odom/odom", 50);
     run_thread_ = std::thread(&LocalizationWrapper::Evaluate, this);
     run_thread_rtk_ = std::thread(&LocalizationWrapper::EvaluateRTK, this);
-    run_thread_fun_ = std::thread(&LocalizationWrapper::Function_Ctl_, this);
-}
-void LocalizationWrapper::Function_Ctl_() {
-    while (ros::ok()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
-    filterangle_odom_rtk_ptr_->Stop();
-    start_alg_ = false;
-    ros::shutdown();
-    std::cout << "ros ok end!" << std::endl;
-    run_thread_.join();
-    run_thread_rtk_.join();
-    run_thread_fun_.join();
 }
 void LocalizationWrapper::Evaluate() {
     while (start_alg_ && ros::ok()) {

@@ -24,7 +24,7 @@
 #include "config.h"
 #include "GeocentricENU.hpp"
 #include <nav_msgs/Odometry.h>
-#define DR_ODOM1 true
+#define DR_ODOM1 false
 #define DR_ODOM2 true
 class LocalizationWrapper {
 public:
@@ -53,7 +53,6 @@ private:
     ros::Publisher odom_pub_;
     std::thread run_thread_;
     std::thread run_thread_rtk_;
-    std::thread run_thread_fun_;
     std::condition_variable_any data_condition_;
     std::condition_variable_any rtk_dr_condition_;
     std::ofstream file_fusion_pos_;

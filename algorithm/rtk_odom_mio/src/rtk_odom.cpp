@@ -463,16 +463,47 @@ OdometryData RTKOdom::sync_dr_rtk(
     if (align_rtk_dr.status < 0) {
         return tmp_dr_pose;
     }
-    OdometryData cur_predict_pos;                          //修复rtk position与yaw的延时
-    if (align_rtk_dr.status == 1 && g_align_pose_update) { //rtk准确,更新直接更新,未更新直接递推
-        if (dr_que_.size()) {
-            while (dr_que_.size()) {
-                if (dr_que_.front().time > align_rtk_dr.time) {
-                    align_rtk_dr.gnss_pose_.rpy[2] = align_rtk_dr.gnss_pose_.rpy[2] + dr_que_.back().rpy[2] - dr_que_.front().rpy[2];
-                    algin_gnss_dr_que_.back().gnss_pose_.rpy[2] = align_rtk_dr.gnss_pose_.rpy[2]; //时间对齐
-                    break;
-                } else {
-                    dr_que_.pop_front();
+    OdometryData cur_predict_pos; //修复rtk position与yaw的延时
+    if (g_align_pose_update) {    //rtk准确,更新直接更新,未更新直接递推
+        if (align_rtk_dr.status == 1) {
+            if (dr_que_.size()) {
+                while (dr_que_.size()) {
+                    if (dr_que_[0].time < align_rtk_dr.time && dr_que_[1].time > align_rtk_dr.time) {
+                        OdometryData close_dr;
+                        if (abs(dr_que_[0].time - align_rtk_dr.time) > abs(dr_que_[1].time - align_rtk_dr.time)) {
+                            close_dr = dr_que_[1];
+                        } else {
+                            close_dr = dr_que_[0];
+                        }
+                        //std::cout << "repair time:" << abs(align_rtk_dr.time - close_dr.time) << "," << dr_que_.back().time - close_dr.time << std::endl;
+                        align_rtk_dr.gnss_pose_.xyz += Eigen::Vector3d{cos(align_rtk_dr.gnss_pose_.rpy[2]) * (dr_que_.back().position - close_dr.position).norm(), sin(align_rtk_dr.gnss_pose_.rpy[2]) * (dr_que_.back().position - close_dr.position).norm(), 0};
+                        align_rtk_dr.gnss_pose_.rpy[2] += dr_que_.back().rpy[2] - close_dr.rpy[2];
+                        align_rtk_dr.gnss_pose_.timestamp = dr_que_.back().time;
+                        algin_gnss_dr_que_.back().gnss_pose_.rpy[2] = align_rtk_dr.gnss_pose_.rpy[2]; //时间对齐
+                        break;
+                    } else {
+                        dr_que_.pop_front();
+                    }
+                }
+            }
+        } else {
+            if (dr_que_.size()) {
+                while (dr_que_.size()) {
+                    if (dr_que_[0].time < align_rtk_dr.time && dr_que_[1].time > align_rtk_dr.time) {
+                        OdometryData close_dr;
+                        if (abs(dr_que_[0].time - align_rtk_dr.time) > abs(dr_que_[1].time - align_rtk_dr.time)) {
+                            close_dr = dr_que_[1];
+                        } else {
+                            close_dr = dr_que_[0];
+                        }
+                        //std::cout << "repair time:" << abs(align_rtk_dr.time - close_dr.time) << "," << dr_que_.back().time - close_dr.time << std::endl;
+                        double rtk_yaw = cur_predict_pos.rpy.z() - (dr_que_.back().rpy[2] - close_dr.rpy[2]);
+                        align_rtk_dr.gnss_pose_.xyz += Eigen::Vector3d{cos(rtk_yaw) * (dr_que_.back().position - close_dr.position).norm(), sin(rtk_yaw) * (dr_que_.back().position - close_dr.position).norm(), 0};
+                        align_rtk_dr.gnss_pose_.timestamp = dr_que_.back().time;
+                        break;
+                    } else {
+                        dr_que_.pop_front();
+                    }
                 }
             }
         }
